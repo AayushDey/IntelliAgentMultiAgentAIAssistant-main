@@ -15,7 +15,7 @@ youtube-transcript-api
 google-generativeai
 duckduckgo-search
 tavily-python
-semantic-scholar
+semanticscholar
 requests
 python-dotenv
 onnxruntime
