@@ -143,8 +143,24 @@ st.markdown("""
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
 /* Global styling */
-* {
-    font-family: 'Inter', sans-serif !important;
+html, body, [data-testid="stAppViewContainer"], .stApp, 
+.stApp h1, .stApp h2, .stApp h3, .stApp p, .stApp label, .stApp input, .stApp button, .stApp textarea, .stApp div, .stApp span {
+    font-family: 'Inter', sans-serif;
+}
+
+/* Explicitly restore font-family for icon classes to prevent them showing as raw text */
+.material-symbols-outlined, 
+.material-icons, 
+[class*="material-symbols"], 
+[class*="material-icons"],
+[data-testid="stSidebar"] button span,
+[data-testid="collapsedSidebar"] button span {
+    font-family: 'Material Symbols Outlined', 'Material Symbols', 'Material Icons' !important;
+}
+
+/* Maintain monospace for code blocks */
+code, pre, kbd, samp, code * {
+    font-family: monospace !important;
 }
 
 /* Main app background with subtle pattern */
