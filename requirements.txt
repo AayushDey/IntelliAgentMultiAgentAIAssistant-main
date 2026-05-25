@@ -151,7 +151,7 @@ PyPDF2==3.0.1
 pypdfium2==4.30.0
 PyPika==0.48.9
 pyproject_hooks==1.2.0
-pyreadline3==3.5.4
+pyreadline3==3.5.4; sys_platform == 'win32'
 PySocks==1.7.1
 python-dateutil==2.9.0.post0
 python-dotenv==1.1.1
