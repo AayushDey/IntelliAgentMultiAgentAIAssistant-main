@@ -79,36 +79,9 @@ YOUTUBE_API_KEY = get_secret("YOUTUBE_API_KEY")
 TAVILY_API_KEY = get_secret("TAVILY_API_KEY")
 GROQ_API_KEY = get_secret("GROQ_API_KEY")
 
-# Resolving helpers to combine secrets and user session inputs
-def get_active_google_key():
-    if getattr(st, 'session_state', None) and st.session_state.get('user_google_key'):
-        return st.session_state.user_google_key.strip()
-    return GOOGLE_API_KEY
-
-def get_active_groq_key():
-    if getattr(st, 'session_state', None) and st.session_state.get('user_groq_key'):
-        return st.session_state.user_groq_key.strip()
-    return GROQ_API_KEY
-
-def get_active_youtube_key():
-    if getattr(st, 'session_state', None) and st.session_state.get('user_youtube_key'):
-        return st.session_state.user_youtube_key.strip()
-    return YOUTUBE_API_KEY
-
-def get_active_tavily_key():
-    if getattr(st, 'session_state', None) and st.session_state.get('user_tavily_key'):
-        return st.session_state.user_tavily_key.strip()
-    return TAVILY_API_KEY
-
-def get_active_hf_token():
-    if getattr(st, 'session_state', None) and st.session_state.get('user_hf_token'):
-        return st.session_state.user_hf_token.strip()
-    return hf_token
-
 def get_tavily_tool():
-    active_key = get_active_tavily_key()
-    if active_key:
-        os.environ["TAVILY_API_KEY"] = active_key
+    if TAVILY_API_KEY:
+        os.environ["TAVILY_API_KEY"] = TAVILY_API_KEY
         try:
             return TavilySearchResults(max_results=5)
         except Exception:
@@ -127,6 +100,66 @@ if TAVILY_API_KEY:
 if GROQ_API_KEY:
     os.environ["GROQ_API_KEY"] = GROQ_API_KEY
 
+# ---------- Active-key helpers (merge env + sidebar session state) ----------
+def get_active_google_key():
+    """Return the best available Google API key (env first, then sidebar input)."""
+    if is_valid_secret(GOOGLE_API_KEY):
+        return GOOGLE_API_KEY
+    try:
+        val = st.session_state.get("user_google_key", "")
+        if is_valid_secret(val):
+            return str(val).strip()
+    except Exception:
+        pass
+    return ""
+
+def get_active_groq_key():
+    """Return the best available Groq API key."""
+    if is_valid_secret(GROQ_API_KEY):
+        return GROQ_API_KEY
+    try:
+        val = st.session_state.get("user_groq_key", "")
+        if is_valid_secret(val):
+            return str(val).strip()
+    except Exception:
+        pass
+    return ""
+
+def get_active_tavily_key():
+    """Return the best available Tavily API key."""
+    if is_valid_secret(TAVILY_API_KEY):
+        return TAVILY_API_KEY
+    try:
+        val = st.session_state.get("user_tavily_key", "")
+        if is_valid_secret(val):
+            return str(val).strip()
+    except Exception:
+        pass
+    return ""
+
+def get_active_youtube_key():
+    """Return the best available YouTube API key."""
+    if is_valid_secret(YOUTUBE_API_KEY):
+        return YOUTUBE_API_KEY
+    try:
+        val = st.session_state.get("user_youtube_key", "")
+        if is_valid_secret(val):
+            return str(val).strip()
+    except Exception:
+        pass
+    return ""
+
+def get_active_hf_token():
+    """Return the best available HuggingFace token."""
+    if is_valid_secret(hf_token):
+        return hf_token
+    try:
+        val = st.session_state.get("user_hf_token", "")
+        if is_valid_secret(val):
+            return str(val).strip()
+    except Exception:
+        pass
+    return ""
 
 
 # Page configuration
@@ -663,7 +696,7 @@ def get_video_thumbnail(video_id):
 def youtube_search_cached(query: str, api_key: str = "") -> str:
     """Enhanced YouTube search with better strategies and error handling."""
     try:
-        API_KEY = api_key if api_key else get_active_youtube_key()
+        API_KEY = api_key if api_key else YOUTUBE_API_KEY
         
         if not API_KEY:
             return "⚠️ YouTube API key not configured. Please set YOUTUBE_API_KEY in your environment."
@@ -726,7 +759,7 @@ def youtube_search_cached(query: str, api_key: str = "") -> str:
 @tool
 def youtube_search(query: str) -> str:
     """Search YouTube for videos related to the query."""
-    return youtube_search_cached(query, get_active_youtube_key())
+    return youtube_search_cached(query, YOUTUBE_API_KEY)
 
 @tool
 def topic_explanation(query: str) -> str:
