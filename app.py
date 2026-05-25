@@ -26,18 +26,50 @@ from urllib.parse import urlparse, parse_qs
 # Load environment variables from .env file for local development
 load_dotenv()
 
+def is_valid_secret(value):
+    if not value:
+        return False
+    value_clean = str(value).strip().strip('"').strip("'")
+    if not value_clean:
+        return False
+    placeholders = ["your_google_api_key", "your_youtube_api_key", "your_tavily_api_key", "your_groq_api_key", "your_huggingface_token", "placeholder", "api_key_here"]
+    for p in placeholders:
+        if p in value_clean.lower():
+            return False
+    return True
+
 # Helper function to load secrets safely from environment or streamlit secrets
 def get_secret(key):
-    # Try reading from environment variables first (local .env)
-    val = os.getenv(key)
-    if val:
-        return val
-    # Fallback to streamlit secrets (Streamlit Cloud deployment)
-    try:
-        if key in st.secrets:
-            return st.secrets[key]
-    except Exception:
-        pass
+    keys_to_try = [key]
+    if key == "GOOGLE_API_KEY":
+        keys_to_try.append("GEMINI_API_KEY")
+        
+    for k in keys_to_try:
+        # 1. Try reading from environment variables
+        val = os.getenv(k)
+        if is_valid_secret(val):
+            return str(val).strip().strip('"').strip("'")
+        
+        val_lower = os.getenv(k.lower())
+        if is_valid_secret(val_lower):
+            return str(val_lower).strip().strip('"').strip("'")
+
+        # 2. Fallback to streamlit secrets (Streamlit Cloud deployment)
+        try:
+            if k in st.secrets and is_valid_secret(st.secrets[k]):
+                return str(st.secrets[k]).strip().strip('"').strip("'")
+            k_lower = k.lower()
+            if k_lower in st.secrets and is_valid_secret(st.secrets[k_lower]):
+                return str(st.secrets[k_lower]).strip().strip('"').strip("'")
+            for section in st.secrets.keys():
+                section_val = st.secrets[section]
+                if isinstance(section_val, dict):
+                    if k in section_val and is_valid_secret(section_val[k]):
+                        return str(section_val[k]).strip().strip('"').strip("'")
+                    if k_lower in section_val and is_valid_secret(section_val[k_lower]):
+                        return str(section_val[k_lower]).strip().strip('"').strip("'")
+        except Exception:
+            pass
     return ""
 
 # Retrieve and propagate API keys
@@ -47,7 +79,43 @@ YOUTUBE_API_KEY = get_secret("YOUTUBE_API_KEY")
 TAVILY_API_KEY = get_secret("TAVILY_API_KEY")
 GROQ_API_KEY = get_secret("GROQ_API_KEY")
 
-# Expose keys to os.environ so third-party tool integrations can automatically pick them up
+# Resolving helpers to combine secrets and user session inputs
+def get_active_google_key():
+    if getattr(st, 'session_state', None) and st.session_state.get('user_google_key'):
+        return st.session_state.user_google_key.strip()
+    return GOOGLE_API_KEY
+
+def get_active_groq_key():
+    if getattr(st, 'session_state', None) and st.session_state.get('user_groq_key'):
+        return st.session_state.user_groq_key.strip()
+    return GROQ_API_KEY
+
+def get_active_youtube_key():
+    if getattr(st, 'session_state', None) and st.session_state.get('user_youtube_key'):
+        return st.session_state.user_youtube_key.strip()
+    return YOUTUBE_API_KEY
+
+def get_active_tavily_key():
+    if getattr(st, 'session_state', None) and st.session_state.get('user_tavily_key'):
+        return st.session_state.user_tavily_key.strip()
+    return TAVILY_API_KEY
+
+def get_active_hf_token():
+    if getattr(st, 'session_state', None) and st.session_state.get('user_hf_token'):
+        return st.session_state.user_hf_token.strip()
+    return hf_token
+
+def get_tavily_tool():
+    active_key = get_active_tavily_key()
+    if active_key:
+        os.environ["TAVILY_API_KEY"] = active_key
+        try:
+            return TavilySearchResults(max_results=5)
+        except Exception:
+            pass
+    return None
+
+# Expose initial keys to os.environ
 if hf_token:
     os.environ["HF_TOKEN"] = hf_token
 if GOOGLE_API_KEY:
@@ -493,41 +561,53 @@ def initialize_session_state():
         st.session_state.current_agent = "general"
     if 'processing' not in st.session_state:
         st.session_state.processing = False
+    if 'user_google_key' not in st.session_state:
+        st.session_state.user_google_key = ""
+    if 'user_groq_key' not in st.session_state:
+        st.session_state.user_groq_key = ""
+    if 'user_tavily_key' not in st.session_state:
+        st.session_state.user_tavily_key = ""
+    if 'user_youtube_key' not in st.session_state:
+        st.session_state.user_youtube_key = ""
+    if 'user_hf_token' not in st.session_state:
+        st.session_state.user_hf_token = ""
 
 initialize_session_state()
 
 # Initialize the model
 @st.cache_resource
-def initialize_model():
-    # If GOOGLE_API_KEY is configured with a real key, try it first
-    if GOOGLE_API_KEY and "your_google_api_key" not in GOOGLE_API_KEY:
+def initialize_model(google_api_key, groq_api_key):
+    # If google_api_key is configured, try it first
+    if google_api_key:
         try:
-            return ChatGoogleGenerativeAI(model="gemini-1.5-flash", api_key=GOOGLE_API_KEY)
+            return ChatGoogleGenerativeAI(model="gemini-1.5-flash", api_key=google_api_key)
         except Exception as e:
             st.warning(f"Google Gemini initialization failed, trying Groq: {str(e)}")
             
-    # Try Groq if a real GROQ_API_KEY is present
-    if GROQ_API_KEY and "your_groq_api_key" not in GROQ_API_KEY:
+    # Try Groq if a real groq_api_key is present
+    if groq_api_key:
         try:
             from langchain_groq import ChatGroq
             # Using llama-3.3-70b-versatile as standard versatile Groq model
-            return ChatGroq(model="llama-3.3-70b-versatile", groq_api_key=GROQ_API_KEY)
+            return ChatGroq(model="llama-3.3-70b-versatile", groq_api_key=groq_api_key)
         except Exception as e:
             st.warning(f"Failed to initialize Groq llama-3.3 model, trying deepseek: {str(e)}")
             try:
                 from langchain_groq import ChatGroq
-                return ChatGroq(model="deepseek-r1-distill-llama-70b", groq_api_key=GROQ_API_KEY)
+                return ChatGroq(model="deepseek-r1-distill-llama-70b", groq_api_key=groq_api_key)
             except Exception as final_groq_err:
                 st.error(f"Failed to initialize Groq model: {str(final_groq_err)}")
             
-    # As a final fallback, try Gemini with whatever key is set
-    try:
-        return ChatGoogleGenerativeAI(model="gemini-1.5-flash", api_key=GOOGLE_API_KEY)
-    except Exception as e:
-        st.error(f"Failed to initialize AI model: {str(e)}")
-        return None
+    # As a final fallback, try Gemini if key is non-empty
+    if google_api_key:
+        try:
+            return ChatGoogleGenerativeAI(model="gemini-1.5-flash", api_key=google_api_key)
+        except Exception as e:
+            st.error(f"Failed to initialize AI model: {str(e)}")
+            return None
+    return None
 
-hf_model = initialize_model()
+hf_model = initialize_model(get_active_google_key(), get_active_groq_key())
 
 # Utility functions
 def extract_video_id(url):
@@ -564,10 +644,10 @@ def get_video_thumbnail(video_id):
 
 # Enhanced Tools
 @st.cache_data(ttl=300)
-def youtube_search_cached(query: str) -> str:
+def youtube_search_cached(query: str, api_key: str = "") -> str:
     """Enhanced YouTube search with better strategies and error handling."""
     try:
-        API_KEY = YOUTUBE_API_KEY
+        API_KEY = api_key if api_key else get_active_youtube_key()
         
         if not API_KEY:
             return "⚠️ YouTube API key not configured. Please set YOUTUBE_API_KEY in your environment."
@@ -604,20 +684,20 @@ def youtube_search_cached(query: str) -> str:
                 
                 items = res.get("items", [])
                 if items:  # Found videos
-                    videos = []
-                    for item in items:
-                        try:
-                            title = item['snippet']['title']
-                            video_id = item['id']['videoId']
-                            channel = item['snippet']['channelTitle']
-                            url_link = f"https://www.youtube.com/watch?v={video_id}"
-                            videos.append(f"📺 **{title}** by {channel}: {url_link}")
-                        except KeyError:
-                            continue
-                    
-                    if videos:
-                        return "\n\n".join(videos)
-                        
+                     videos = []
+                     for item in items:
+                         try:
+                             title = item['snippet']['title']
+                             video_id = item['id']['videoId']
+                             channel = item['snippet']['channelTitle']
+                             url_link = f"https://www.youtube.com/watch?v={video_id}"
+                             videos.append(f"📺 **{title}** by {channel}: {url_link}")
+                         except KeyError:
+                             continue
+                     
+                     if videos:
+                         return "\n\n".join(videos)
+                         
             except requests.exceptions.RequestException:
                 continue  # Try next search term
             except Exception:
@@ -630,7 +710,7 @@ def youtube_search_cached(query: str) -> str:
 @tool
 def youtube_search(query: str) -> str:
     """Search YouTube for videos related to the query."""
-    return youtube_search_cached(query)
+    return youtube_search_cached(query, get_active_youtube_key())
 
 @tool
 def topic_explanation(query: str) -> str:
@@ -820,8 +900,8 @@ from langchain_community.document_loaders import PyPDFLoader
 from sentence_transformers import SentenceTransformer
 
 class PDFRAGAgent:
-    def __init__(self, hf_token):
-        self.hf_token = hf_token
+    def __init__(self, hf_token=None):
+        self.hf_token = get_active_hf_token()
         self.retriever = None
 
     @staticmethod
@@ -1080,16 +1160,29 @@ Error: {str(e)}"""
 class NewsAgent:
     def __init__(self, model):
         self.model = model
-        self.tools = [tavily_tool, duck_tool]
+        self.tools = []
         
     def process(self, query: str) -> str:
-        if not tavily_tool:
-            return "News search tools are not available."
+        t_tool = get_tavily_tool()
+        d_tool = duck_tool
+        
+        news_results = None
+        if t_tool:
+            try:
+                news_results = t_tool.invoke({"query": query + " latest news today"})
+            except Exception as e:
+                st.warning(f"Tavily search failed, falling back to DuckDuckGo: {str(e)}")
+        
+        if not news_results and d_tool:
+            try:
+                news_results = d_tool.invoke({"query": query + " latest news today"})
+            except Exception as e:
+                return f"News search failed: {str(e)}"
+                
+        if not news_results:
+            return "News search tools are not available or failed to execute."
         
         try:
-            # Get latest news
-            news_results = tavily_tool.invoke({"query": query + " latest news today"})
-            
             # Generate news summary
             summary_prompt = f"""
             Summarize the latest news about '{query}' based on this information:
@@ -1410,6 +1503,76 @@ def display_pdf_tab():
 
 # Main App Layout
 def main():
+    # Sidebar for API Keys configuration
+    with st.sidebar:
+        st.header("🔑 API Credentials")
+        st.markdown("If your API keys are not set in the environment or secrets, you can paste them below:")
+        
+        # User input fields in sidebar
+        google_input = st.text_input(
+            "Google Gemini API Key", 
+            value=st.session_state.user_google_key,
+            type="password",
+            help="Get it from Google AI Studio (Required for Gemini model)"
+        )
+        if google_input != st.session_state.user_google_key:
+            st.session_state.user_google_key = google_input
+            st.rerun()
+            
+        groq_input = st.text_input(
+            "Groq API Key (Optional)", 
+            value=st.session_state.user_groq_key,
+            type="password",
+            help="Get it from Groq Console (Used as fallback)"
+        )
+        if groq_input != st.session_state.user_groq_key:
+            st.session_state.user_groq_key = groq_input
+            st.rerun()
+            
+        tavily_input = st.text_input(
+            "Tavily API Key (Optional)", 
+            value=st.session_state.user_tavily_key,
+            type="password",
+            help="Get it from Tavily AI (Used for web search)"
+        )
+        if tavily_input != st.session_state.user_tavily_key:
+            st.session_state.user_tavily_key = tavily_input
+            st.rerun()
+            
+        youtube_input = st.text_input(
+            "YouTube API Key (Optional)", 
+            value=st.session_state.user_youtube_key,
+            type="password",
+            help="Get it from Google Cloud Console (Used for video searches)"
+        )
+        if youtube_input != st.session_state.user_youtube_key:
+            st.session_state.user_youtube_key = youtube_input
+            st.rerun()
+            
+        hf_input = st.text_input(
+            "HuggingFace Token (Optional)", 
+            value=st.session_state.user_hf_token,
+            type="password",
+            help="Get it from HuggingFace Settings"
+        )
+        if hf_input != st.session_state.user_hf_token:
+            st.session_state.user_hf_token = hf_input
+            st.rerun()
+            
+        # Status indicators
+        st.markdown("---")
+        st.subheader("📡 Connection Status")
+        google_ok = bool(get_active_google_key())
+        groq_ok = bool(get_active_groq_key())
+        tavily_ok = bool(get_active_tavily_key())
+        youtube_ok = bool(get_active_youtube_key())
+        
+        st.markdown(f"**Gemini Model**: {'✅ Loaded' if hf_model else '❌ Not Initialized'}")
+        st.markdown(f"**Google Key**: {'🟢 Active' if google_ok else '🔴 Missing'}")
+        st.markdown(f"**Groq Key**: {'🟢 Active' if groq_ok else '⚪ Not Set (Fallback disabled)'}")
+        st.markdown(f"**Tavily Key**: {'🟢 Active' if tavily_ok else '⚪ Not Set (DDG search fallback enabled)'}")
+        st.markdown(f"**YouTube Key**: {'🟢 Active' if youtube_ok else '⚪ Not Set (Video search disabled)'}")
+
     st.title("🤖 AI Multi-Agent Assistant")
     st.markdown("*Your intelligent companion for education, research, video analysis, and more!*")
     
