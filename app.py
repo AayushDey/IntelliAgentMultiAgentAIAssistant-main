@@ -23,6 +23,14 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from urllib.parse import urlparse, parse_qs
 
+# Page configuration
+st.set_page_config(
+    page_title="AI Multi-Agent Assistant",
+    page_icon="🤖",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
+
 # Load environment variables from .env file for local development
 load_dotenv()
 
@@ -56,21 +64,25 @@ def get_secret(key):
 
         # 2. Fallback to streamlit secrets (Streamlit Cloud deployment)
         try:
-            if k in st.secrets and is_valid_secret(st.secrets[k]):
-                return str(st.secrets[k]).strip().strip('"').strip("'")
-            k_lower = k.lower()
-            if k_lower in st.secrets and is_valid_secret(st.secrets[k_lower]):
-                return str(st.secrets[k_lower]).strip().strip('"').strip("'")
-            for section in st.secrets.keys():
-                section_val = st.secrets[section]
-                if isinstance(section_val, dict):
-                    if k in section_val and is_valid_secret(section_val[k]):
-                        return str(section_val[k]).strip().strip('"').strip("'")
-                    if k_lower in section_val and is_valid_secret(section_val[k_lower]):
-                        return str(section_val[k_lower]).strip().strip('"').strip("'")
+            # Check if streamlit secrets file exists to avoid "No secrets found" warning
+            has_secrets_file = os.path.exists(".streamlit/secrets.toml") or os.path.exists(os.path.expanduser("~/.streamlit/secrets.toml"))
+            if has_secrets_file:
+                if k in st.secrets and is_valid_secret(st.secrets[k]):
+                    return str(st.secrets[k]).strip().strip('"').strip("'")
+                k_lower = k.lower()
+                if k_lower in st.secrets and is_valid_secret(st.secrets[k_lower]):
+                    return str(st.secrets[k_lower]).strip().strip('"').strip("'")
+                for section in st.secrets.keys():
+                    section_val = st.secrets[section]
+                    if isinstance(section_val, dict):
+                        if k in section_val and is_valid_secret(section_val[k]):
+                            return str(section_val[k]).strip().strip('"').strip("'")
+                        if k_lower in section_val and is_valid_secret(section_val[k_lower]):
+                            return str(section_val[k_lower]).strip().strip('"').strip("'")
         except Exception:
             pass
     return ""
+
 
 # Retrieve and propagate API keys
 hf_token = get_secret("HF_TOKEN")
@@ -100,75 +112,39 @@ if TAVILY_API_KEY:
 if GROQ_API_KEY:
     os.environ["GROQ_API_KEY"] = GROQ_API_KEY
 
-# ---------- Active-key helpers (merge env + sidebar session state) ----------
+# ---------- Active-key helpers (env + secrets only) ----------
 def get_active_google_key():
-    """Return the best available Google API key (env first, then sidebar input)."""
+    """Return the best available Google API key."""
     if is_valid_secret(GOOGLE_API_KEY):
         return GOOGLE_API_KEY
-    try:
-        val = st.session_state.get("user_google_key", "")
-        if is_valid_secret(val):
-            return str(val).strip()
-    except Exception:
-        pass
     return ""
 
 def get_active_groq_key():
     """Return the best available Groq API key."""
     if is_valid_secret(GROQ_API_KEY):
         return GROQ_API_KEY
-    try:
-        val = st.session_state.get("user_groq_key", "")
-        if is_valid_secret(val):
-            return str(val).strip()
-    except Exception:
-        pass
     return ""
 
 def get_active_tavily_key():
     """Return the best available Tavily API key."""
     if is_valid_secret(TAVILY_API_KEY):
         return TAVILY_API_KEY
-    try:
-        val = st.session_state.get("user_tavily_key", "")
-        if is_valid_secret(val):
-            return str(val).strip()
-    except Exception:
-        pass
     return ""
 
 def get_active_youtube_key():
     """Return the best available YouTube API key."""
     if is_valid_secret(YOUTUBE_API_KEY):
         return YOUTUBE_API_KEY
-    try:
-        val = st.session_state.get("user_youtube_key", "")
-        if is_valid_secret(val):
-            return str(val).strip()
-    except Exception:
-        pass
     return ""
 
 def get_active_hf_token():
     """Return the best available HuggingFace token."""
     if is_valid_secret(hf_token):
         return hf_token
-    try:
-        val = st.session_state.get("user_hf_token", "")
-        if is_valid_secret(val):
-            return str(val).strip()
-    except Exception:
-        pass
     return ""
 
 
-# Page configuration
-st.set_page_config(
-    page_title="AI Multi-Agent Assistant",
-    page_icon="🤖",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+
 
 st.markdown("""
 <style>
@@ -196,9 +172,9 @@ code, pre, kbd, samp, code * {
     font-family: monospace !important;
 }
 
-/* Main app background with subtle pattern */
+/* Main app background with bright gradient */
 .stApp {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: linear-gradient(135deg, #f5f7fa 0%, #e8ecf4 30%, #fce4ec 60%, #fff3e0 100%);
     background-attachment: fixed;
 }
 
@@ -452,12 +428,12 @@ input, textarea, .stTextInput input, .stTextArea textarea {
     border-radius: 15px !important;
     border: 2px solid #FF9933 !important;
     padding: 0.8rem !important;
-    background: #2c3e50 !important;
-    color: #ffffff !important;
+    background: #ffffff !important;
+    color: #2c3e50 !important;
     backdrop-filter: blur(10px) !important;
     box-shadow: 
-        0 4px 15px rgba(0, 0, 0, 0.2),
-        inset 0 1px 0 rgba(255, 255, 255, 0.1) !important;
+        0 4px 15px rgba(0, 0, 0, 0.06),
+        inset 0 1px 0 rgba(255, 255, 255, 0.8) !important;
     transition: all 0.3s ease !important;
     font-weight: 500 !important;
     font-size: 16px !important;
@@ -465,17 +441,17 @@ input, textarea, .stTextInput input, .stTextArea textarea {
 
 input::placeholder, textarea::placeholder, 
 .stTextInput input::placeholder, .stTextArea textarea::placeholder {
-    color: #bdc3c7 !important;
+    color: #95a5a6 !important;
     opacity: 0.8 !important;
 }
 
 input:focus, textarea:focus, .stTextInput input:focus, .stTextArea textarea:focus {
     border-color: #FFB366 !important;
-    background: #34495e !important;
-    color: #ffffff !important;
+    background: #fff9f0 !important;
+    color: #2c3e50 !important;
     box-shadow: 
-        0 8px 25px rgba(255, 153, 51, 0.4),
-        inset 0 1px 0 rgba(255, 255, 255, 0.2) !important;
+        0 8px 25px rgba(255, 153, 51, 0.15),
+        inset 0 1px 0 rgba(255, 255, 255, 0.8) !important;
     transform: translateY(-2px) !important;
     outline: none !important;
 }
@@ -610,16 +586,6 @@ def initialize_session_state():
         st.session_state.current_agent = "general"
     if 'processing' not in st.session_state:
         st.session_state.processing = False
-    if 'user_google_key' not in st.session_state:
-        st.session_state.user_google_key = ""
-    if 'user_groq_key' not in st.session_state:
-        st.session_state.user_groq_key = ""
-    if 'user_tavily_key' not in st.session_state:
-        st.session_state.user_tavily_key = ""
-    if 'user_youtube_key' not in st.session_state:
-        st.session_state.user_youtube_key = ""
-    if 'user_hf_token' not in st.session_state:
-        st.session_state.user_hf_token = ""
 
 initialize_session_state()
 
@@ -1552,76 +1518,6 @@ def display_pdf_tab():
 
 # Main App Layout
 def main():
-    # Sidebar for API Keys configuration
-    with st.sidebar:
-        st.header("🔑 API Credentials")
-        st.markdown("If your API keys are not set in the environment or secrets, you can paste them below:")
-        
-        # User input fields in sidebar
-        google_input = st.text_input(
-            "Google Gemini API Key", 
-            value=st.session_state.user_google_key,
-            type="password",
-            help="Get it from Google AI Studio (Required for Gemini model)"
-        )
-        if google_input != st.session_state.user_google_key:
-            st.session_state.user_google_key = google_input
-            st.rerun()
-            
-        groq_input = st.text_input(
-            "Groq API Key (Optional)", 
-            value=st.session_state.user_groq_key,
-            type="password",
-            help="Get it from Groq Console (Used as fallback)"
-        )
-        if groq_input != st.session_state.user_groq_key:
-            st.session_state.user_groq_key = groq_input
-            st.rerun()
-            
-        tavily_input = st.text_input(
-            "Tavily API Key (Optional)", 
-            value=st.session_state.user_tavily_key,
-            type="password",
-            help="Get it from Tavily AI (Used for web search)"
-        )
-        if tavily_input != st.session_state.user_tavily_key:
-            st.session_state.user_tavily_key = tavily_input
-            st.rerun()
-            
-        youtube_input = st.text_input(
-            "YouTube API Key (Optional)", 
-            value=st.session_state.user_youtube_key,
-            type="password",
-            help="Get it from Google Cloud Console (Used for video searches)"
-        )
-        if youtube_input != st.session_state.user_youtube_key:
-            st.session_state.user_youtube_key = youtube_input
-            st.rerun()
-            
-        hf_input = st.text_input(
-            "HuggingFace Token (Optional)", 
-            value=st.session_state.user_hf_token,
-            type="password",
-            help="Get it from HuggingFace Settings"
-        )
-        if hf_input != st.session_state.user_hf_token:
-            st.session_state.user_hf_token = hf_input
-            st.rerun()
-            
-        # Status indicators
-        st.markdown("---")
-        st.subheader("📡 Connection Status")
-        google_ok = bool(get_active_google_key())
-        groq_ok = bool(get_active_groq_key())
-        tavily_ok = bool(get_active_tavily_key())
-        youtube_ok = bool(get_active_youtube_key())
-        
-        st.markdown(f"**Gemini Model**: {'✅ Loaded' if hf_model else '❌ Not Initialized'}")
-        st.markdown(f"**Google Key**: {'🟢 Active' if google_ok else '🔴 Missing'}")
-        st.markdown(f"**Groq Key**: {'🟢 Active' if groq_ok else '⚪ Not Set (Fallback disabled)'}")
-        st.markdown(f"**Tavily Key**: {'🟢 Active' if tavily_ok else '⚪ Not Set (DDG search fallback enabled)'}")
-        st.markdown(f"**YouTube Key**: {'🟢 Active' if youtube_ok else '⚪ Not Set (Video search disabled)'}")
-
     st.title("🤖 AI Multi-Agent Assistant")
     st.markdown("*Your intelligent companion for education, research, video analysis, and more!*")
     
