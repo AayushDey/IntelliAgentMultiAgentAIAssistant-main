@@ -2,812 +2,493 @@ import streamlit as st
 import re
 import tempfile
 import requests
-from typing import List, Dict, Annotated, TypedDict, Literal
-from sentence_transformers import SentenceTransformer
+from typing import List, Dict
 import os
+import time
 from dotenv import load_dotenv
 from langchain_core.tools import tool
-from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
-from langchain_core.prompts import PromptTemplate,ChatPromptTemplate
+from langchain_core.messages import HumanMessage
+from langchain_core.prompts import PromptTemplate, ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_community.utilities.semanticscholar import SemanticScholarAPIWrapper
 from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled, VideoUnavailable
-from langchain_community.tools.tavily_search import TavilySearchResults
-from langchain_google_genai import ChatGoogleGenerativeAI
-import time
+try:
+    from langchain_tavily import TavilySearch as TavilySearchResults
+except ImportError:
+    from langchain_community.tools.tavily_search import TavilySearchResults
+from langchain_groq import ChatGroq
 from langchain_community.vectorstores import Chroma
-
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from urllib.parse import urlparse, parse_qs
 
-# Page configuration
+# ═══════════════════════════════════════════════════════════════
+# PAGE CONFIGURATION
+# ═══════════════════════════════════════════════════════════════
 st.set_page_config(
-    page_title="AI Multi-Agent Assistant",
-    page_icon="🤖",
+    page_title="IntelliAgent — Multi-Agent AI Assistant",
+    page_icon="🧠",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
-# Load environment variables from .env file for local development
+# ═══════════════════════════════════════════════════════════════
+# ENVIRONMENT & API KEYS
+# ═══════════════════════════════════════════════════════════════
 load_dotenv()
 
-def is_valid_secret(value):
-    if not value:
-        return False
-    value_clean = str(value).strip().strip('"').strip("'")
-    if not value_clean:
-        return False
-    placeholders = ["your_google_api_key", "your_youtube_api_key", "your_tavily_api_key", "your_groq_api_key", "your_huggingface_token", "placeholder", "api_key_here"]
-    for p in placeholders:
-        if p in value_clean.lower():
-            return False
-    return True
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip().strip('"').strip("'")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip().strip('"').strip("'")
 
-# Helper function to load secrets safely from environment or streamlit secrets
-def get_secret(key):
-    keys_to_try = [key]
-    if key == "GOOGLE_API_KEY":
-        keys_to_try.append("GEMINI_API_KEY")
-        
-    for k in keys_to_try:
-        # 1. Try reading from environment variables
-        val = os.getenv(k)
-        if is_valid_secret(val):
-            return str(val).strip().strip('"').strip("'")
-        
-        val_lower = os.getenv(k.lower())
-        if is_valid_secret(val_lower):
-            return str(val_lower).strip().strip('"').strip("'")
+if GROQ_API_KEY:
+    os.environ["GROQ_API_KEY"] = GROQ_API_KEY
+if TAVILY_API_KEY:
+    os.environ["TAVILY_API_KEY"] = TAVILY_API_KEY
 
-        # 2. Fallback to streamlit secrets (Streamlit Cloud deployment)
-        try:
-            # Check if streamlit secrets file exists to avoid "No secrets found" warning
-            has_secrets_file = os.path.exists(".streamlit/secrets.toml") or os.path.exists(os.path.expanduser("~/.streamlit/secrets.toml"))
-            if has_secrets_file:
-                if k in st.secrets and is_valid_secret(st.secrets[k]):
-                    return str(st.secrets[k]).strip().strip('"').strip("'")
-                k_lower = k.lower()
-                if k_lower in st.secrets and is_valid_secret(st.secrets[k_lower]):
-                    return str(st.secrets[k_lower]).strip().strip('"').strip("'")
-                for section in st.secrets.keys():
-                    section_val = st.secrets[section]
-                    if isinstance(section_val, dict):
-                        if k in section_val and is_valid_secret(section_val[k]):
-                            return str(section_val[k]).strip().strip('"').strip("'")
-                        if k_lower in section_val and is_valid_secret(section_val[k_lower]):
-                            return str(section_val[k_lower]).strip().strip('"').strip("'")
-        except Exception:
-            pass
-    return ""
-
-
-# Retrieve and propagate API keys
-hf_token = get_secret("HF_TOKEN")
-GOOGLE_API_KEY = get_secret("GOOGLE_API_KEY")
-YOUTUBE_API_KEY = get_secret("YOUTUBE_API_KEY")
-TAVILY_API_KEY = get_secret("TAVILY_API_KEY")
-GROQ_API_KEY = get_secret("GROQ_API_KEY")
 
 def get_tavily_tool():
-    if TAVILY_API_KEY:
-        os.environ["TAVILY_API_KEY"] = TAVILY_API_KEY
+    if TAVILY_API_KEY and not TAVILY_API_KEY.startswith("your_"):
         try:
             return TavilySearchResults(max_results=5)
         except Exception:
             pass
     return None
 
-# Expose initial keys to os.environ
-if hf_token:
-    os.environ["HF_TOKEN"] = hf_token
-if GOOGLE_API_KEY:
-    os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
-if YOUTUBE_API_KEY:
-    os.environ["YOUTUBE_API_KEY"] = YOUTUBE_API_KEY
-if TAVILY_API_KEY:
-    os.environ["TAVILY_API_KEY"] = TAVILY_API_KEY
-if GROQ_API_KEY:
-    os.environ["GROQ_API_KEY"] = GROQ_API_KEY
 
-# ---------- Active-key helpers (env + secrets only) ----------
-def get_active_google_key():
-    """Return the best available Google API key."""
-    if is_valid_secret(GOOGLE_API_KEY):
-        return GOOGLE_API_KEY
-    return ""
-
-def get_active_groq_key():
-    """Return the best available Groq API key."""
-    if is_valid_secret(GROQ_API_KEY):
-        return GROQ_API_KEY
-    return ""
-
-def get_active_tavily_key():
-    """Return the best available Tavily API key."""
-    if is_valid_secret(TAVILY_API_KEY):
-        return TAVILY_API_KEY
-    return ""
-
-def get_active_youtube_key():
-    """Return the best available YouTube API key."""
-    if is_valid_secret(YOUTUBE_API_KEY):
-        return YOUTUBE_API_KEY
-    return ""
-
-def get_active_hf_token():
-    """Return the best available HuggingFace token."""
-    if is_valid_secret(hf_token):
-        return hf_token
-    return ""
-
-
-
-
+# ═══════════════════════════════════════════════════════════════
+# HIGH-CONTRAST THEME CSS
+# ═══════════════════════════════════════════════════════════════
 st.markdown("""
 <style>
-/* Import beautiful fonts */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
-/* Global styling */
-html, body, [data-testid="stAppViewContainer"], .stApp, 
-.stApp h1, .stApp h2, .stApp h3, .stApp p, .stApp label, .stApp input, .stApp button, .stApp textarea, .stApp div, .stApp span {
-    font-family: 'Inter', sans-serif;
+/* ── Global Typography ── */
+html, body, [data-testid="stAppViewContainer"], .stApp,
+.stApp h1, .stApp h2, .stApp h3, .stApp p, .stApp label,
+.stApp input, .stApp button, .stApp textarea, .stApp div, .stApp span {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+code, pre, kbd, samp {
+    font-family: 'JetBrains Mono', monospace !important;
 }
 
-/* Explicitly restore font-family for icon classes to prevent them showing as raw text */
-.material-symbols-outlined, 
-.material-icons, 
-[class*="material-symbols"], 
-[class*="material-icons"],
-[data-testid="stSidebar"] button span,
-[data-testid="collapsedSidebar"] button span {
-    font-family: 'Material Symbols Outlined', 'Material Symbols', 'Material Icons' !important;
-}
-
-/* Maintain monospace for code blocks */
-code, pre, kbd, samp, code * {
-    font-family: monospace !important;
-}
-
-/* Main app background with bright gradient */
+/* ── High-Contrast Dark Background ── */
 .stApp {
-    background: linear-gradient(135deg, #f5f7fa 0%, #e8ecf4 30%, #fce4ec 60%, #fff3e0 100%);
+    background-color: #0A0F1D;
+    background-image: radial-gradient(circle at 50% 0%, rgba(30, 41, 59, 0.45) 0%, #0A0F1D 70%);
     background-attachment: fixed;
+    color: #F8FAFC;
 }
 
-/* Main Chat Container with glassmorphism */
-.chat-container {
-    background: rgba(255, 255, 255, 0.15) !important;
-    backdrop-filter: blur(20px);
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    border-radius: 25px;
-    padding: 20px;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
-    position: relative;
-    overflow: hidden;
+/* ── Sidebar ── */
+section[data-testid="stSidebar"] {
+    background-color: #0B1120 !important;
+    border-right: 1px solid #1E293B !important;
+}
+section[data-testid="stSidebar"] h1,
+section[data-testid="stSidebar"] h2,
+section[data-testid="stSidebar"] h3,
+section[data-testid="stSidebar"] h4,
+section[data-testid="stSidebar"] h5,
+section[data-testid="stSidebar"] p,
+section[data-testid="stSidebar"] span,
+section[data-testid="stSidebar"] label {
+    color: #E2E8F0 !important;
+}
+section[data-testid="stSidebar"] .stSelectbox label {
+    font-weight: 600 !important;
+    font-size: 0.85rem !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.8px !important;
+    color: #94A3B8 !important;
 }
 
-.chat-container::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: linear-gradient(135deg, #FF9933, #FFFFFF, #138808);
-    background-size: 400% 400%;
-    animation: gradientBG 20s ease infinite;
-    opacity: 0.1;
-    z-index: -1;
+/* ── Hero Title ── */
+.hero-title {
+    font-size: 2.5rem;
+    font-weight: 800;
+    background: linear-gradient(135deg, #38BDF8 0%, #818CF8 50%, #C084FC 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 0;
+    line-height: 1.2;
+}
+.hero-subtitle {
+    color: #94A3B8;
+    font-size: 1.02rem;
+    font-weight: 400;
+    margin-top: 6px;
 }
 
-/* Enhanced gradient animation */
-@keyframes gradientBG {
-    0% { background-position: 0% 50%; }
-    25% { background-position: 100% 50%; }
-    50% { background-position: 100% 100%; }
-    75% { background-position: 0% 100%; }
-    100% { background-position: 0% 50%; }
-}
-
-/* User Message with enhanced styling */
-.user-message {
-    background: linear-gradient(135deg, #FF9933 0%, #FFB366 50%, #FFFFFF 100%);
-    color: #2c3e50 !important;
-    padding: 16px 24px;
-    border-radius: 25px 25px 8px 25px;
-    margin: 12px 0;
-    box-shadow: 
-        0 8px 25px rgba(255, 153, 51, 0.3),
-        inset 0 1px 0 rgba(255, 255, 255, 0.6);
-    animation: slideInRight 0.7s cubic-bezier(0.25, 0.46, 0.45, 0.94);
-    position: relative;
-    border: 1px solid rgba(255, 255, 255, 0.3);
-    font-weight: 500;
+/* ── Status Pills ── */
+.status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 14px;
+    border-radius: 20px;
+    font-size: 0.78rem;
+    font-weight: 600;
     letter-spacing: 0.3px;
 }
-
-.user-message::before {
-    content: '👤';
-    position: absolute;
-    top: -8px;
-    right: -8px;
-    background: #FF9933;
-    border-radius: 50%;
-    width: 24px;
-    height: 24px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 12px;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+.status-online {
+    background: rgba(16, 185, 129, 0.15);
+    color: #34D399;
+    border: 1px solid rgba(16, 185, 129, 0.35);
+}
+.status-offline {
+    background: rgba(239, 68, 68, 0.15);
+    color: #F87171;
+    border: 1px solid rgba(239, 68, 68, 0.35);
 }
 
-/* Bot Message with enhanced styling */
-.bot-message {
-    background: linear-gradient(135deg, #FFFFFF 0%, #E8F5E8 50%, #138808 100%);
-    color: #2c3e50 !important;
-    padding: 16px 24px;
-    border-radius: 25px 25px 25px 8px;
-    margin: 12px 0;
-    border-left: 5px solid #138808;
-    box-shadow: 
-        0 8px 25px rgba(19, 136, 8, 0.3),
-        inset 0 1px 0 rgba(255, 255, 255, 0.6);
-    animation: slideInLeft 0.7s cubic-bezier(0.25, 0.46, 0.45, 0.94);
-    position: relative;
-    border: 1px solid rgba(255, 255, 255, 0.3);
-    font-weight: 400;
-    letter-spacing: 0.2px;
-    line-height: 1.6;
+/* ── Chat Messages Styling ── */
+div[data-testid="stChatMessage"] {
+    background-color: #111827 !important;
+    border: 1px solid #1E293B !important;
+    border-radius: 14px !important;
+    padding: 16px 20px !important;
+    margin: 10px 0 !important;
+}
+div[data-testid="stChatMessage"]:has(div[data-testid="chatAvatarIcon-user"]) {
+    background-color: #162032 !important;
+    border: 1px solid #2B3A55 !important;
+}
+div[data-testid="stChatMessage"]:has(div[data-testid="chatAvatarIcon-assistant"]) {
+    background-color: #0E1626 !important;
+    border: 1px solid #1E2C45 !important;
+    border-left: 3px solid #6366F1 !important;
+}
+div[data-testid="stChatMessage"] p,
+div[data-testid="stChatMessage"] li {
+    color: #F1F5F9 !important;
+    font-size: 0.96rem !important;
+    line-height: 1.65 !important;
+}
+div[data-testid="stChatMessage"] h1,
+div[data-testid="stChatMessage"] h2,
+div[data-testid="stChatMessage"] h3,
+div[data-testid="stChatMessage"] h4 {
+    color: #FFFFFF !important;
 }
 
-.bot-message::before {
-    content: '🤖';
-    position: absolute;
-    top: -8px;
-    left: -8px;
-    background: #138808;
-    border-radius: 50%;
-    width: 24px;
-    height: 24px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 12px;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-}
-
-/* Enhanced animations */
-@keyframes slideInRight {
-    from {
-        opacity: 0;
-        transform: translateX(30px) scale(0.95);
-    }
-    to {
-        opacity: 1;
-        transform: translateX(0) scale(1);
-    }
-}
-
-@keyframes slideInLeft {
-    from {
-        opacity: 0;
-        transform: translateX(-30px) scale(0.95);
-    }
-    to {
-        opacity: 1;
-        transform: translateX(0) scale(1);
-    }
-}
-
-/* Enhanced Metric Cards with 3D effect */
-.metric-card {
-    background: linear-gradient(135deg, #FF9933 0%, #FFFFFF 50%, #138808 100%);
-    color: #2c3e50 !important;
-    border-radius: 20px;
-    padding: 25px;
-    text-align: center;
-    box-shadow: 
-        0 15px 35px rgba(255, 153, 51, 0.4),
-        inset 0 1px 0 rgba(255, 255, 255, 0.6);
-    transition: all 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
-    position: relative;
-    overflow: hidden;
-    border: 1px solid rgba(255, 255, 255, 0.3);
-    backdrop-filter: blur(10px);
-}
-
-.metric-card::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: -100%;
-    width: 100%;
-    height: 100%;
-    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.4), transparent);
-    transition: left 0.5s;
-}
-
-.metric-card:hover {
-    transform: translateY(-8px) scale(1.02);
-    box-shadow: 
-        0 25px 50px rgba(255, 153, 51, 0.6),
-        inset 0 1px 0 rgba(255, 255, 255, 0.8);
-}
-
-.metric-card:hover::before {
-    left: 100%;
-}
-
-/* Enhanced Agent Badge with pulsing effect */
+/* ── Agent Badges ── */
 .agent-badge {
-    display: inline-block;
-    background: linear-gradient(45deg, #FF9933, #FFFFFF, #138808);
-    color: #2c3e50;
-    padding: 0.4rem 1rem;
-    border-radius: 25px;
-    font-size: 0.85rem;
-    font-weight: 600;
-    margin-bottom: 0.8rem;
-    box-shadow: 0 4px 15px rgba(255, 153, 51, 0.4);
-    border: 1px solid rgba(255, 255, 255, 0.3);
-    animation: pulse 2s infinite;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 0.74rem;
+    font-weight: 700;
     letter-spacing: 0.5px;
     text-transform: uppercase;
+    margin-bottom: 8px;
 }
+.badge-education { background: rgba(99,102,241,0.2); color: #A5B4FC; border: 1px solid rgba(99,102,241,0.4); }
+.badge-code { background: rgba(16,185,129,0.2); color: #6EE7B7; border: 1px solid rgba(16,185,129,0.4); }
+.badge-research { background: rgba(236,72,153,0.2); color: #F472B6; border: 1px solid rgba(236,72,153,0.4); }
+.badge-interview { background: rgba(249,115,22,0.2); color: #FDBA74; border: 1px solid rgba(249,115,22,0.4); }
+.badge-health { background: rgba(20,184,166,0.2); color: #5EEAD4; border: 1px solid rgba(20,184,166,0.4); }
+.badge-news { background: rgba(14,165,233,0.2); color: #7DD3FC; border: 1px solid rgba(14,165,233,0.4); }
+.badge-resume { background: rgba(234,179,8,0.2); color: #FDE047; border: 1px solid rgba(234,179,8,0.4); }
+.badge-video { background: rgba(239,68,68,0.2); color: #FCA5A5; border: 1px solid rgba(239,68,68,0.4); }
+.badge-pdf { background: rgba(168,85,247,0.2); color: #D8B4FE; border: 1px solid rgba(168,85,247,0.4); }
+.badge-general { background: rgba(100,116,139,0.2); color: #CBD5E1; border: 1px solid rgba(100,116,139,0.4); }
 
-@keyframes pulse {
-    0%, 100% { transform: scale(1); }
-    50% { transform: scale(1.05); }
-}
-
-/* Enhanced Sidebar with glassmorphism */
-section[data-testid="stSidebar"] {
-    background: rgba(255, 255, 255, 0.1) !important;
-    backdrop-filter: blur(20px) !important;
-    border-right: 1px solid rgba(255, 255, 255, 0.2) !important;
-}
-
-section[data-testid="stSidebar"] .css-1v3fvcr, 
-section[data-testid="stSidebar"] .css-1d391kg,
-section[data-testid="stSidebar"] * {
-    color: #2c3e50 !important;
-    font-weight: 500 !important;
-}
-
-/* Enhanced Buttons with modern styling */
+/* ── Primary Buttons ── */
 div.stButton > button {
-    background: linear-gradient(135deg, #FF9933, #FFB366, #138808) !important;
-    color: #2c3e50 !important;
-    border-radius: 30px !important;
+    background: linear-gradient(135deg, #2563EB 0%, #4F46E5 100%) !important;
+    color: #FFFFFF !important;
     border: none !important;
-    padding: 0.8rem 2rem !important;
+    border-radius: 10px !important;
+    padding: 0.65rem 1.6rem !important;
     font-weight: 600 !important;
-    box-shadow: 
-        0 8px 25px rgba(255, 153, 51, 0.4),
-        inset 0 1px 0 rgba(255, 255, 255, 0.6) !important;
-    transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94) !important;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    position: relative;
-    overflow: hidden;
+    font-size: 0.9rem !important;
+    letter-spacing: 0.3px !important;
+    transition: all 0.25s ease !important;
+    box-shadow: 0 4px 14px rgba(37,99,235,0.3) !important;
 }
-
-div.stButton > button::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: -100%;
-    width: 100%;
-    height: 100%;
-    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.4), transparent);
-    transition: left 0.5s;
-}
-
 div.stButton > button:hover {
-    transform: translateY(-3px) scale(1.02) !important;
-    box-shadow: 
-        0 15px 35px rgba(255, 153, 51, 0.6),
-        inset 0 1px 0 rgba(255, 255, 255, 0.8) !important;
-}
-
-div.stButton > button:hover::before {
-    left: 100%;
-}
-
-div.stButton > button:active {
-    transform: translateY(-1px) scale(0.98) !important;
-}
-
-/* Enhanced Text Inputs with better visibility */
-input, textarea, .stTextInput input, .stTextArea textarea {
-    border-radius: 15px !important;
-    border: 2px solid #FF9933 !important;
-    padding: 0.8rem !important;
-    background: #ffffff !important;
-    color: #2c3e50 !important;
-    backdrop-filter: blur(10px) !important;
-    box-shadow: 
-        0 4px 15px rgba(0, 0, 0, 0.06),
-        inset 0 1px 0 rgba(255, 255, 255, 0.8) !important;
-    transition: all 0.3s ease !important;
-    font-weight: 500 !important;
-    font-size: 16px !important;
-}
-
-input::placeholder, textarea::placeholder, 
-.stTextInput input::placeholder, .stTextArea textarea::placeholder {
-    color: #95a5a6 !important;
-    opacity: 0.8 !important;
-}
-
-input:focus, textarea:focus, .stTextInput input:focus, .stTextArea textarea:focus {
-    border-color: #FFB366 !important;
-    background: #fff9f0 !important;
-    color: #2c3e50 !important;
-    box-shadow: 
-        0 8px 25px rgba(255, 153, 51, 0.15),
-        inset 0 1px 0 rgba(255, 255, 255, 0.8) !important;
     transform: translateY(-2px) !important;
+    box-shadow: 0 8px 24px rgba(37,99,235,0.5) !important;
+}
+div.stButton > button:active {
+    transform: translateY(0) !important;
+}
+
+/* ── Text Inputs & Textareas ── */
+.stTextInput input, .stTextArea textarea {
+    background-color: #0F172A !important;
+    border: 1px solid #334155 !important;
+    border-radius: 10px !important;
+    color: #F8FAFC !important;
+    font-size: 0.95rem !important;
+    padding: 0.75rem 1rem !important;
+    transition: all 0.25s ease !important;
+}
+.stTextInput input:focus, .stTextArea textarea:focus {
+    border-color: #38BDF8 !important;
+    box-shadow: 0 0 0 3px rgba(56,189,248,0.2) !important;
     outline: none !important;
 }
-
-/* Enhanced File Uploader */
-.stFileUploader {
-    background: rgba(255, 255, 255, 0.1) !important;
-    border-radius: 20px !important;
-    border: 2px dashed rgba(255, 153, 51, 0.5) !important;
-    padding: 2rem !important;
-    text-align: center !important;
-    transition: all 0.3s ease !important;
+.stTextInput input::placeholder, .stTextArea textarea::placeholder {
+    color: #64748B !important;
 }
 
-.stFileUploader:hover {
-    background: rgba(255, 255, 255, 0.2) !important;
-    border-color: #FF9933 !important;
-    transform: scale(1.02) !important;
-}
-
-/* Enhanced Tabs */
+/* ── Tabs ── */
 .stTabs [data-baseweb="tab-list"] {
-    background: rgba(255, 255, 255, 0.1) !important;
-    border-radius: 25px !important;
-    padding: 0.5rem !important;
-    backdrop-filter: blur(10px) !important;
+    background: #0F172A;
+    border-radius: 12px;
+    padding: 5px;
+    gap: 4px;
+    border: 1px solid #1E293B;
 }
-
 .stTabs [data-baseweb="tab"] {
-    background: transparent !important;
-    border-radius: 20px !important;
-    color: #2c3e50 !important;
+    border-radius: 8px !important;
+    color: #94A3B8 !important;
     font-weight: 500 !important;
-    transition: all 0.3s ease !important;
+    font-size: 0.88rem !important;
+    padding: 8px 20px !important;
+    transition: all 0.2s ease !important;
 }
-
+.stTabs [data-baseweb="tab"]:hover {
+    color: #F1F5F9 !important;
+    background: rgba(255,255,255,0.03) !important;
+}
 .stTabs [aria-selected="true"] {
-    background: linear-gradient(135deg, #FF9933, #FFB366, #138808) !important;
-    color: #2c3e50 !important;
-    box-shadow: 0 4px 15px rgba(255, 153, 51, 0.4) !important;
+    background: rgba(56,189,248,0.12) !important;
+    color: #38BDF8 !important;
+    border-bottom: 2px solid #38BDF8 !important;
+    font-weight: 600 !important;
 }
 
-/* Loading spinner enhancement */
-.stSpinner > div {
-    border-top-color: #FF9933 !important;
-    border-right-color: #FF9933 !important;
-}
-
-/* Success/Error message enhancement */
-.stSuccess {
-    background: linear-gradient(135deg, rgba(19, 136, 8, 0.1), rgba(255, 255, 255, 0.1)) !important;
-    border-left: 4px solid #138808 !important;
-    border-radius: 10px !important;
-    backdrop-filter: blur(10px) !important;
-}
-
-.stError {
-    background: linear-gradient(135deg, rgba(231, 76, 60, 0.1), rgba(255, 255, 255, 0.1)) !important;
-    border-left: 4px solid #e74c3c !important;
-    border-radius: 10px !important;
-    backdrop-filter: blur(10px) !important;
-}
-
-/* Custom scrollbar */
-::-webkit-scrollbar {
-    width: 8px;
-}
-
-::-webkit-scrollbar-track {
-    background: rgba(255, 255, 255, 0.1);
-    border-radius: 10px;
-}
-
-::-webkit-scrollbar-thumb {
-    background: linear-gradient(135deg, #FF9933, #138808);
-    border-radius: 10px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-    background: linear-gradient(135deg, #FFB366, #4CAF50);
-}
-
-/* Responsive design */
-@media (max-width: 768px) {
-    .user-message, .bot-message {
-        padding: 12px 16px;
-        margin: 8px 0;
-    }
-    
-    .metric-card {
-        padding: 15px;
-    }
-    
-    div.stButton > button {
-        padding: 0.6rem 1.5rem !important;
-    }
-}
-
-/* Additional enhancements */
-.stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
-    color: #2c3e50 !important;
-    font-weight: 700 !important;
-    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.1) !important;
-}
-
-.stMarkdown code {
-    background: rgba(255, 153, 51, 0.1) !important;
-    border: 1px solid rgba(255, 153, 51, 0.3) !important;
-    border-radius: 6px !important;
-    color: #2c3e50 !important;
-}
-
-/* Hover effects for interactive elements */
-.stSelectbox > div, .stMultiSelect > div {
+/* ── File Uploader ── */
+.stFileUploader {
+    background: #0F172A !important;
+    border: 2px dashed #334155 !important;
+    border-radius: 14px !important;
     transition: all 0.3s ease !important;
 }
+.stFileUploader:hover {
+    border-color: #38BDF8 !important;
+    background: rgba(56,189,248,0.04) !important;
+}
 
-.stSelectbox > div:hover, .stMultiSelect > div:hover {
-    transform: translateY(-2px) !important;
-    box-shadow: 0 8px 25px rgba(255, 153, 51, 0.3) !important;
+/* ── Headings & Markdown Text ── */
+.stMarkdown h1, .stMarkdown h2, .stMarkdown h3, .stMarkdown h4 {
+    color: #FFFFFF !important;
+    font-weight: 700 !important;
+}
+.stMarkdown p, .stMarkdown li {
+    color: #E2E8F0 !important;
+}
+.stMarkdown a {
+    color: #38BDF8 !important;
+    text-decoration: none;
+    font-weight: 500;
+}
+.stMarkdown a:hover {
+    text-decoration: underline;
+}
+
+/* ── Code Formatting ── */
+:not(pre) > code {
+    background: #1E293B !important;
+    color: #38BDF8 !important;
+    border: 1px solid #334155 !important;
+    border-radius: 6px !important;
+    padding: 2px 7px !important;
+    font-size: 0.88em !important;
+}
+pre {
+    background: #090D16 !important;
+    border: 1px solid #1E293B !important;
+    border-radius: 12px !important;
+}
+
+/* ── Alerts & Expanders ── */
+.stAlert, div[data-testid="stAlert"] {
+    border-radius: 12px !important;
+    border: 1px solid rgba(255,255,255,0.08) !important;
+}
+.streamlit-expanderHeader {
+    color: #F1F5F9 !important;
+    font-weight: 600 !important;
+    background: #111827 !important;
+    border-radius: 10px !important;
+}
+
+/* ── Scrollbars ── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+    background: #334155;
+    border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: #475569;
+}
+
+/* ── Responsive ── */
+@media (max-width: 768px) {
+    .hero-title { font-size: 1.8rem; }
 }
 </style>
 """, unsafe_allow_html=True)
 
 
-
-# Initialize session state
+# ═══════════════════════════════════════════════════════════════
+# SESSION STATE
+# ═══════════════════════════════════════════════════════════════
 def initialize_session_state():
-    if 'chat_history' not in st.session_state:
-        st.session_state.chat_history = []
-    if 'current_agent' not in st.session_state:
-        st.session_state.current_agent = "general"
-    if 'processing' not in st.session_state:
-        st.session_state.processing = False
+    defaults = {
+        'chat_history': [],
+        'current_agent': 'general',
+        'processing': False,
+        'model_name': 'Not Connected',
+        'force_agent': 'auto',
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
 initialize_session_state()
 
-# Initialize the model
+
+# ═══════════════════════════════════════════════════════════════
+# MODEL INITIALIZATION (Groq)
+# ═══════════════════════════════════════════════════════════════
 @st.cache_resource
-def initialize_model(google_api_key, groq_api_key):
-    # If google_api_key is configured, try it first
-    if google_api_key:
-        try:
-            return ChatGoogleGenerativeAI(model="gemini-1.5-flash", api_key=google_api_key)
-        except Exception as e:
-            st.warning(f"Google Gemini initialization failed, trying Groq: {str(e)}")
-            
-    # Try Groq if a real groq_api_key is present
-    if groq_api_key:
-        try:
-            from langchain_groq import ChatGroq
-            # Using llama-3.3-70b-versatile as standard versatile Groq model
-            return ChatGroq(model="llama-3.3-70b-versatile", groq_api_key=groq_api_key)
-        except Exception as e:
-            st.warning(f"Failed to initialize Groq llama-3.3 model, trying deepseek: {str(e)}")
-            try:
-                from langchain_groq import ChatGroq
-                return ChatGroq(model="deepseek-r1-distill-llama-70b", groq_api_key=groq_api_key)
-            except Exception as final_groq_err:
-                st.error(f"Failed to initialize Groq model: {str(final_groq_err)}")
-            
-    # As a final fallback, try Gemini if key is non-empty
-    if google_api_key:
-        try:
-            return ChatGoogleGenerativeAI(model="gemini-1.5-flash", api_key=google_api_key)
-        except Exception as e:
-            st.error(f"Failed to initialize AI model: {str(e)}")
-            return None
-    return None
-
-hf_model = initialize_model(get_active_google_key(), get_active_groq_key())
-
-# Utility functions
-def extract_video_id(url):
-    """Extract video ID from YouTube URL."""
-    try:
-        patterns = [
-            r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',
-            r'(?:embed\/)([0-9A-Za-z_-]{11})',
-            r'(?:youtu\.be\/)([0-9A-Za-z_-]{11})'
+def initialize_model(groq_key: str):
+    """Initialize Groq LLM model. Returns (model, model_display_name)."""
+    if groq_key:
+        models_to_try = [
+            ("openai/gpt-oss-120b", "Groq GPT-OSS 120B"),
+            ("llama-3.3-70b-versatile", "Groq Llama 3.3 70B"),
+            ("llama-3.1-8b-instant", "Groq Llama 3.1 8B"),
         ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, url)
-            if match:
-                return match.group(1)
-        return None
-    except:
-        return None
-
-def is_valid_youtube_url(url):
-    """Validate YouTube URL format."""
-    youtube_patterns = [
-        r'https?://(?:www\.)?youtube\.com/watch\?v=([^&\s]+)',
-        r'https?://youtu\.be/([^&\s]+)',
-        r'https?://(?:www\.)?youtube\.com/embed/([^&\s]+)'
-    ]
-    return any(re.match(pattern, url) for pattern in youtube_patterns)
-
-def get_video_thumbnail(video_id):
-    """Get YouTube video thumbnail URL."""
-    if video_id:
-        return f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg"
-    return None
-
-# Enhanced Tools
-@st.cache_data(ttl=300)
-def youtube_search_cached(query: str, api_key: str = "") -> str:
-    """Enhanced YouTube search with better strategies and error handling."""
-    try:
-        API_KEY = api_key if api_key else YOUTUBE_API_KEY
-        
-        if not API_KEY:
-            return "⚠️ YouTube API key not configured. Please set YOUTUBE_API_KEY in your environment."
-        
-        # Try multiple search strategies
-        search_terms = [
-            f"{query} tutorial explanation",
-            f"{query} explained simply", 
-            f"what is {query}",
-            f"{query} guide",
-            query
-        ]
-        
-        for search_term in search_terms:
+        for model_id, display_name in models_to_try:
             try:
-                url = "https://www.googleapis.com/youtube/v3/search"
-                params = {
-                    "part": "snippet",
-                    "q": search_term,
-                    "type": "video",
-                    "maxResults": 5,
-                    "key": API_KEY,
-                    "order": "relevance",
-                    "regionCode": "IN",
-                    "safeSearch": "moderate"
-                }
-                
-                response = requests.get(url, params=params, timeout=15)
-                response.raise_for_status()
-                res = response.json()
-                
-                if "error" in res:
-                    continue  # Try next search term
-                
-                items = res.get("items", [])
-                if items:  # Found videos
-                     videos = []
-                     for item in items:
-                         try:
-                             title = item['snippet']['title']
-                             video_id = item['id']['videoId']
-                             channel = item['snippet']['channelTitle']
-                             url_link = f"https://www.youtube.com/watch?v={video_id}"
-                             videos.append(f"📺 **{title}** by {channel}: {url_link}")
-                         except KeyError:
-                             continue
-                     
-                     if videos:
-                         return "\n\n".join(videos)
-                         
-            except requests.exceptions.RequestException:
-                continue  # Try next search term
+                model = ChatGroq(model=model_id, groq_api_key=groq_key)
+                return model, display_name
             except Exception:
                 continue
-        
-        return "🔍 No videos found. YouTube search may be temporarily unavailable."
-        
-    except Exception as e:
-        return f"❌ YouTube search error: {str(e)}"
-@tool
-def youtube_search(query: str) -> str:
-    """Search YouTube for videos related to the query."""
-    return youtube_search_cached(query, YOUTUBE_API_KEY)
+    return None, "Not Connected"
 
+hf_model, _model_name = initialize_model(GROQ_API_KEY)
+st.session_state.model_name = _model_name
+
+
+# ═══════════════════════════════════════════════════════════════
+# UTILITY FUNCTIONS
+# ═══════════════════════════════════════════════════════════════
+def extract_video_id(url: str):
+    """Extract video ID from YouTube URL."""
+    try:
+        parsed = urlparse(url)
+        if parsed.hostname in ('www.youtube.com', 'youtube.com'):
+            return parse_qs(parsed.query).get('v', [None])[0]
+        elif parsed.hostname == 'youtu.be':
+            return parsed.path.lstrip('/')
+    except Exception:
+        pass
+    match = re.search(r'(?:v=|/)([0-9A-Za-z_-]{11})', url)
+    return match.group(1) if match else None
+
+def is_valid_youtube_url(url: str):
+    if not url:
+        return False
+    patterns = [
+        r'https?://(?:www\.)?youtube\.com/watch\?v=',
+        r'https?://youtu\.be/',
+        r'https?://(?:www\.)?youtube\.com/embed/'
+    ]
+    return any(re.match(p, url) for p in patterns)
+
+def get_video_thumbnail(video_id: str):
+    return f"https://img.youtube.com/vi/{video_id}/mqdefault.jpg"
+
+
+# ═══════════════════════════════════════════════════════════════
+# TOOLS
+# ═══════════════════════════════════════════════════════════════
 @tool
 def topic_explanation(query: str) -> str:
     """Return a comprehensive conceptual explanation of the topic."""
     if not hf_model:
-        return "AI model is not available. Please check configuration."
-    
+        return "AI model is not available. Please check your GROQ_API_KEY."
     try:
-        prompt = f"""
-        Provide a detailed explanation of '{query}' covering:
-        1. Core concept and definition
-        2. Key components or principles
-        3. Real-world applications
-        4. Why it's important
-        
-        Make it beginner-friendly but comprehensive.
-        """
+        prompt = f"""Provide a detailed, well-structured explanation of '{query}' covering:
+1. Core concept and clear definition
+2. Key components, principles, or mechanisms
+3. Real-world applications and examples
+4. Common pitfalls or misconceptions
+
+Use clean markdown formatting. Be beginner-friendly yet technically thorough."""
         return hf_model.invoke([HumanMessage(content=prompt)]).content
     except Exception as e:
         return f"Error generating explanation: {str(e)}"
+
 
 @tool
 def generate_resume(job_description: str, candidate_info: str = "") -> str:
     """Generate a professional LaTeX resume optimized for ATS systems."""
     if not hf_model:
-        return "AI model is not available. Please check configuration."
-    
+        return "AI model is not available. Please check your GROQ_API_KEY."
     try:
-        prompt = f"""
-        Create a modern, ATS-friendly LaTeX resume using clean formatting.
-        
-        Requirements:
-        - Use standard LaTeX packages (no exotic dependencies)
-        - Include proper sections: Contact, Summary, Skills, Experience, Education, Projects
-        - Optimize for keyword matching
-        - Professional formatting with clear hierarchy
-        
-        Job Description: {job_description}
-        Candidate Info: {candidate_info if candidate_info else "Entry-level candidate"}
-        
-        Return only valid LaTeX code.
-        """
+        prompt = f"""Create a modern, ATS-friendly LaTeX resume using clean formatting.
+
+Requirements:
+- Use standard LaTeX packages (article, geometry, enumitem, hyperref)
+- Include proper sections: Contact Information, Professional Summary, Core Competencies, Experience, Education, Technical Projects
+- Maximize keyword alignment with the job description
+- Use bullet points starting with strong action verbs
+
+Job Description: {job_description}
+Candidate Info: {candidate_info if candidate_info else "Entry-level to mid-level candidate"}
+
+Return only valid LaTeX code inside a code block."""
         return hf_model.invoke([HumanMessage(content=prompt)]).content
     except Exception as e:
         return f"Error generating resume: {str(e)}"
 
-# Initialize other tools
+
 try:
     ss = SemanticScholarAPIWrapper(top_k_results=5, load_max_docs=5)
-except:
+except Exception:
     ss = None
 
 @tool
 def semantic_scholar_research(query: str) -> List[Dict]:
     """Fetch and summarize top research papers from Semantic Scholar."""
     if not ss:
-        return [{"error": "Semantic Scholar not available"}]
-    
+        return [{"error": "Semantic Scholar search is currently unavailable."}]
     try:
         raw = ss.run(query)
         papers = raw.split("\n\n")
         result = []
-        
         for p in papers[:3]:
             if "abstract:" in p.lower():
                 if hf_model:
                     summary = hf_model.invoke([
-                        HumanMessage(content=f"Summarize this research paper in 3-4 sentences:\n{p}")
+                        HumanMessage(content=f"Summarize this research paper in 3 concise bullet points focusing on methodology and key findings:\n{p}")
                     ]).content
                     result.append({"raw_info": p, "summary": summary})
                 else:
-                    result.append({"raw_info": p, "summary": "AI model unavailable for summarization"})
-        
+                    result.append({"raw_info": p, "summary": "AI model unavailable"})
         return result
     except Exception as e:
-        return [{"error": f"Error fetching papers: {str(e)}"}]
+        return [{"error": f"Error fetching research papers: {str(e)}"}]
 
-# YouTube QA functionality
-prompt_template = """
-You are a helpful assistant designed to answer questions about a YouTube video based on its transcript.
-Answer the user's question using ONLY the provided transcript context.
-If the information is not in the context, explicitly say "I cannot find information about that in the video transcript."
+
+# YouTube Transcript Q&A (No API Key Required)
+qa_prompt = PromptTemplate(
+    template="""You are a helpful video assistant. Answer the user's question using ONLY the provided transcript context.
+If the information is not in the transcript, say "I cannot find information about that in the video transcript."
 
 Transcript:
 {context}
@@ -815,498 +496,395 @@ Transcript:
 Question:
 {question}
 
-Answer:
-"""
-prompt = PromptTemplate(template=prompt_template, input_variables=['context', 'question'])
+Answer:""",
+    input_variables=['context', 'question']
+)
 
 def get_transcript(video_id: str):
-    """Fetch transcript safely with enhanced error handling."""
+    """Fetch transcript safely without requiring a YouTube API key."""
     if not video_id:
         return None, "Invalid video ID provided."
-    
     try:
-        # Try Hindi first
-        transcript_list = YouTubeTranscriptApi().fetch(video_id, languages=["hi"])
+        transcript_list = YouTubeTranscriptApi().fetch(video_id, languages=["en", "hi"])
     except NoTranscriptFound:
         try:
-            # Fallback to English
-            transcript_list = YouTubeTranscriptApi().fetch(video_id, languages=["en"])
-        except NoTranscriptFound:
-            try:
-                # Try auto-generated captions
-                transcript_list = YouTubeTranscriptApi().list_transcripts(video_id)
-                transcript = transcript_list.find_generated_transcript(['hi', 'en'])
-                transcript_list = transcript.fetch()
-            except:
-                return None, "No transcript available in Hindi, English, or auto-generated captions."
+            transcript_list = YouTubeTranscriptApi().list_transcripts(video_id)
+            transcript = transcript_list.find_generated_transcript(['en', 'hi'])
+            transcript_list = transcript.fetch()
+        except Exception:
+            return None, "No transcript available for this video."
     except (TranscriptsDisabled, VideoUnavailable) as e:
         return None, f"Video transcript unavailable: {str(e)}"
     except Exception as e:
-        return None, f"Unexpected error fetching transcript: {str(e)}"
+        return None, f"Error fetching transcript: {str(e)}"
 
     try:
-        texts = []
-        for snippet in transcript_list:
-            if isinstance(snippet, dict):
-                texts.append(snippet.get("text", ""))
-            else:
-                texts.append(getattr(snippet, "text", ""))
-
+        texts = [s.get("text", "") if isinstance(s, dict) else getattr(s, "text", "") for s in transcript_list]
         transcript = " ".join(texts)
         if len(transcript.strip()) < 10:
-            return None, "Retrieved transcript is too short or empty."
-            
+            return None, "Retrieved transcript is empty."
         return transcript, None
     except Exception as e:
         return None, f"Error processing transcript: {str(e)}"
 
 @tool
-def youtube_qa(video_url: str, question: str):
-    """Given a YouTube URL and question, return answer based on transcript."""
+def youtube_qa(video_url: str, question: str) -> str:
+    """Given a YouTube URL and question, return answer based on subtitles/transcript."""
     if not hf_model:
-        return "AI model is not available. Please check configuration."
-    
+        return "AI model is not available."
     try:
         if not is_valid_youtube_url(video_url):
             return "Invalid YouTube URL format. Please provide a valid YouTube link."
-        
         video_id = extract_video_id(video_url)
         if not video_id:
             return "Could not extract video ID from the provided URL."
-        
         transcript, error = get_transcript(video_id)
-        
         if error:
             return f"Transcript Error: {error}"
-
-        if not transcript or len(transcript.strip()) < 10:
-            return "Retrieved transcript is empty or too short to analyze."
-
-        # Limit transcript size
         if len(transcript) > 8000:
-            transcript = transcript[:8000] + "... (transcript truncated)"
-
+            transcript = transcript[:8000] + "... (truncated)"
         rag_runnable = (
             {"context": RunnablePassthrough(), "question": RunnablePassthrough()}
-            | prompt
+            | qa_prompt
             | hf_model
         )
         answer = rag_runnable.invoke({"context": transcript, "question": question})
-        
         return answer.content if hasattr(answer, 'content') else str(answer)
-
     except Exception as e:
         return f"Error processing video: {str(e)}"
 
-# Initialize search tools
+
+@tool
+def code_assistant_tool(query: str) -> str:
+    """Generate, explain, debug, or review code based on the user's request."""
+    if not hf_model:
+        return "AI model is not available."
+    try:
+        prompt = f"""You are an expert senior software engineer. Help the user with their coding request.
+
+User Request: {query}
+
+Instructions:
+- Write clean, production-ready, well-commented code with error handling.
+- If debugging, pinpoint the bug, explain why it happens, and provide the corrected code.
+- If explaining, provide a structured breakdown of logic and time/space complexities.
+- Always use markdown code blocks with the appropriate language identifier.
+- Include example usage or test cases."""
+        return hf_model.invoke([HumanMessage(content=prompt)]).content
+    except Exception as e:
+        return f"Error with code assistant: {str(e)}"
+
+
+@tool
+def interview_prep_tool(query: str) -> str:
+    """Generate role-specific interview questions with model answers and tips."""
+    if not hf_model:
+        return "AI model is not available."
+    try:
+        prompt = f"""You are an elite executive career coach and technical hiring manager.
+
+User Request: {query}
+
+Provide a comprehensive interview prep package:
+1. **Top 3-5 Likely Questions** (mix of technical, architectural, and behavioral).
+2. **Model Answers (STAR Method)**: Situation, Task, Action, Result for behavioral questions, or step-by-step problem breakdown for technical questions.
+3. **Common Pitfalls**: What bad candidates say vs. what top 1% candidates say.
+4. **Questions to Ask the Interviewer**: Strategic questions that impress hiring committees.
+
+Format clearly with markdown."""
+        return hf_model.invoke([HumanMessage(content=prompt)]).content
+    except Exception as e:
+        return f"Error with interview prep: {str(e)}"
+
+
+@tool
+def health_advisor_tool(query: str) -> str:
+    """Provide educational health and wellness information with medical disclaimers."""
+    if not hf_model:
+        return "AI model is not available."
+    try:
+        prompt = f"""You are an empathetic, evidence-based health and wellness educator.
+
+User Question: {query}
+
+Instructions:
+- Explain the physiology or medical concepts in accessible, clear language.
+- Provide evidence-based wellness insights, lifestyle suggestions, or nutrition advice.
+- Highlight when a person should urgently consult a qualified doctor or emergency services.
+- Keep the tone compassionate, objective, and supportive.
+
+DISCLAIMER: Always include a prominent reminder that this is for educational purposes only and not medical advice."""
+        return hf_model.invoke([HumanMessage(content=prompt)]).content
+    except Exception as e:
+        return f"Error with health advisor: {str(e)}"
+
+
+# Search tools initialization
 try:
     duck_tool = DuckDuckGoSearchRun()
-    tavily_tool =TavilySearchResults(max_results=5)
-
-except:
+except Exception:
     duck_tool = None
-    tavily_tool = None
 
-# *****************************************************
-import streamlit as st
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-# Redundant imports removed
-from langchain_community.document_loaders import PyPDFLoader
-from sentence_transformers import SentenceTransformer
+tavily_tool = get_tavily_tool()
 
+
+# ═══════════════════════════════════════════════════════════════
+# PDF RAG AGENT (Local Embeddings — No API Key Required)
+# ═══════════════════════════════════════════════════════════════
 class PDFRAGAgent:
-    def __init__(self, hf_token=None):
-        self.hf_token = get_active_hf_token()
+    def __init__(self):
         self.retriever = None
 
     @staticmethod
     @st.cache_resource(show_spinner=False)
     def get_embedding_model():
-        """Load HuggingFaceEmbeddings once and cache it"""
+        """Load sentence-transformers embeddings locally (no API key required)."""
         return HuggingFaceEmbeddings(
             model_name="sentence-transformers/all-MiniLM-L6-v2"
         )
 
     def load_pdf(self, pdf_file):
-        """Load and index a single PDF"""
-        # Create temporary file for PyPDFLoader
+        """Load and index a single PDF."""
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             tmp.write(pdf_file.read())
             tmp_path = tmp.name
-
         try:
-            # Load PDF documents
             loader = PyPDFLoader(tmp_path)
             documents = loader.load()
-
-            # Split text into chunks
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=900, 
-                chunk_overlap=30
-            )
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=900, chunk_overlap=40)
             split_docs = text_splitter.split_documents(documents)
-
-            # Get cached embedding model - CORRECTED: Remove parameter
             embedding_model = self.get_embedding_model()
-
-            # Create vector database - CORRECTED: Use embedding_model directly
             db = Chroma.from_documents(
                 split_docs,
-                embedding=embedding_model,  # Use the HuggingFaceEmbeddings object directly
+                embedding=embedding_model,
                 collection_name="student_pdf"
             )
-
             self.retriever = db.as_retriever(
                 search_type="similarity",
-                search_kwargs={"k": 3}  # top 3 similar chunks
+                search_kwargs={"k": 3}
             )
-
             return True
-
         except Exception as e:
             st.error(f"Error loading PDF: {str(e)}")
             return False
         finally:
-            # Clean up temporary file
             try:
                 os.unlink(tmp_path)
-            except:
+            except Exception:
                 pass
 
-    def answer_question(self, query, model):
-        """Answer a question based on the uploaded PDF"""
+    def answer_question(self, query: str, model):
+        """Answer questions based on the indexed PDF."""
         if not self.retriever:
             return "⚠️ Please upload a PDF first."
-
         try:
-            # Get relevant documents
             docs = self.retriever.invoke(query)
             context = "\n\n".join([d.page_content for d in docs])
-
             if not context.strip():
                 return "❌ No relevant content found in the PDF for your question."
-
-            # Prepare prompt
             prompt = ChatPromptTemplate.from_template(
-                "You are a helpful assistant for students.\n"
+                "You are an expert document assistant.\n"
                 "Answer the question based only on the provided document context.\n"
                 "If the information is not clearly present in the context, say so.\n\n"
                 "Context:\n{context}\n\nQuestion: {question}\n\nAnswer:"
             )
-
-            # Run chain
             chain = prompt | model
             response = chain.invoke({"context": context, "question": query})
-            
             return response.content if hasattr(response, 'content') else str(response)
-
         except Exception as e:
             return f"❌ Error processing question: {str(e)}"
 
-# Updated tab5 section for the main app
+
+# ═══════════════════════════════════════════════════════════════
+# AGENTS
+# ═══════════════════════════════════════════════════════════════
+AGENT_META = {
+    "education":       {"icon": "🎓", "label": "Education",       "badge": "badge-education"},
+    "code":            {"icon": "💻", "label": "Code Assistant",  "badge": "badge-code"},
+    "research":        {"icon": "🔬", "label": "Research",        "badge": "badge-research"},
+    "interview":       {"icon": "🎤", "label": "Interview Prep",  "badge": "badge-interview"},
+    "health":          {"icon": "🏥", "label": "Health Advisor",  "badge": "badge-health"},
+    "news":            {"icon": "📰", "label": "News",            "badge": "badge-news"},
+    "resume":          {"icon": "📄", "label": "Resume",          "badge": "badge-resume"},
+    "video_analysis":  {"icon": "🎥", "label": "Video Analysis",  "badge": "badge-video"},
+    "pdf":             {"icon": "📑", "label": "PDF Q&A",         "badge": "badge-pdf"},
+    "general":         {"icon": "🤖", "label": "General",         "badge": "badge-general"},
+    "error":           {"icon": "❌", "label": "Error",           "badge": "badge-general"},
+}
 
 
-# Specialized Agents
 class EducationAgent:
     def __init__(self, model):
         self.model = model
-        self.tools = [topic_explanation, youtube_search]
-        
+
     def process(self, query: str) -> str:
         try:
-            # Get conceptual explanation
             explanation = topic_explanation.invoke({"query": query})
-            
-            # Always try to get videos
-            try:
-                videos = youtube_search.invoke({"query": query})
-                if not videos or "Error" in videos or "No related videos found" in videos:
-                    # Try alternative search
-                    videos = youtube_search_cached(f"{query} tutorial")
-                    
-                if "Error" in videos or "No videos found" in videos:
-                    videos = "🔍 Video search temporarily unavailable. Try searching YouTube directly for tutorial videos on this topic."
-                    
-            except Exception as video_error:
-                videos = f"⚠️ Unable to fetch videos: {str(video_error)}"
-            
-            response = f"""## 🎓 Educational Response: {query}
+            return f"""## 🎓 Educational Breakdown: {query}
 
-                        ### 📚 Detailed Explanation:
-                        {explanation}
+{explanation}
 
-                        ### 🎥 Related Video Resources:
-                                    {videos}
-
-                                    ### 💡 Study Tips:
-                        - Start with the conceptual understanding above
-                                        - Watch the recommended videos for visual learning
-                                        - Take notes and practice with examples
-                                        - Ask follow-up questions if you need clarification on specific points
-                                                """
-            return response
-            
+### 💡 Study & Application Tips
+- Focus on the core mechanism before diving into edge cases.
+- Practice by explaining this concept to someone else in simple terms.
+- Try asking for code examples or real-world case studies if you want to go deeper!"""
         except Exception as e:
-            # Fallback: still try to provide videos even if explanation fails
-            try:
-                videos = youtube_search_cached(query)
-                return f"""## ⚠️ Partial Response for: {query}
+            return f"❌ Educational query error: {str(e)}"
 
-                                    I encountered an error generating the full explanation, but here are relevant videos:
 
-                                ### 🎥 Video Resources:
-                                        {videos}
-
-                                                Please try rephrasing your question or ask for specific aspects of this topic.
-            Error: {str(e)}"""
-            except:
-                return f"❌ Unable to process educational query: {str(e)}"
 class ResearchAgent:
     def __init__(self, model):
         self.model = model
-        self.tools = [semantic_scholar_research, youtube_search]
-        
+
     def process(self, query: str) -> str:
         try:
-            # Get research papers
             papers = semantic_scholar_research.invoke({"query": query})
-            
-            # Always try to get educational videos about the research topic
-            try:
-                videos = youtube_search_cached(f"{query} research explained")
-                if "No videos found" in videos or "Error" in videos:
-                    videos = youtube_search_cached(f"{query} academic review")
-                if "No videos found" in videos or "Error" in videos:
-                    videos = youtube_search_cached(f"{query} latest findings")
-            except Exception:
-                videos = "🔍 Research videos temporarily unavailable."
-            
-            response = f"## 🔬 Research Analysis: {query}\n\n"
-            
-            # Format research papers
-            if papers and isinstance(papers, list):
-                response += "### 📄 Academic Papers:\n"
+            response = f"## 🔬 Academic Research: {query}\n\n"
+            if papers and isinstance(papers, list) and "error" not in papers[0]:
+                response += "### 📄 Key Papers & Abstracts\n\n"
                 for i, paper in enumerate(papers[:3], 1):
                     if isinstance(paper, dict):
-                        if "summary" in paper:
-                            response += f"{i}. **Research Summary**: {paper['summary']}\n\n"
-                        elif "raw_info" in paper:
-                            response += f"{i}. **Paper Info**: {paper['raw_info'][:300]}...\n\n"
-            
-            response += f"### 🎥 Educational Videos on This Research:\n{videos}\n\n"
-            response += "### 🔍 Research Tips:\n- Check the paper abstracts and conclusions first\n- Watch videos to understand complex concepts\n- Look for recent publications and citation patterns"
-            
+                        summary = paper.get("summary", "")
+                        raw = paper.get("raw_info", "")
+                        if summary:
+                            response += f"**{i}. Key Findings:**\n{summary}\n\n"
+                        elif raw:
+                            response += f"**{i}. Paper Details:**\n{raw[:300]}...\n\n"
+            else:
+                # Fallback to model synthesis
+                prompt = f"Provide a research-level synthesis of academic consensus on: '{query}'. Include key theories, milestones, and open questions."
+                response += self.model.invoke([HumanMessage(content=prompt)]).content
+
             return response
-            
         except Exception as e:
-            # Fallback with videos
-            try:
-                videos = youtube_search_cached(f"{query} research")
-                return f"""## 🔬 Research Resources: {query}
+            return f"❌ Research query error: {str(e)}"
 
-Unable to fetch academic papers, but here are educational videos on this research topic:
-
-### 🎥 Research Videos:
-{videos}
-
-Error: {str(e)}"""
-            except:
-                return f"❌ Research query failed: {str(e)}"
 
 class ResumeAgent:
     def __init__(self, model):
         self.model = model
-        self.tools = [generate_resume]
-        
+
     def process(self, query: str, job_desc: str = "", candidate_info: str = "") -> str:
         try:
-            # Generate resume
             resume_latex = generate_resume.invoke({
                 "job_description": job_desc or query,
                 "candidate_info": candidate_info
             })
-            
-            # Always try to get resume writing videos
-            try:
-                videos = youtube_search_cached(f"resume writing tips {query}")
-                if "No videos found" in videos:
-                    videos = youtube_search_cached("professional resume writing guide")
-            except Exception:
-                videos = "🔍 Resume tutorial videos temporarily unavailable."
-            
-            return f"""## 📄 Resume Generation Complete
+            return f"""## 📄 ATS-Optimized Resume
 
-### 📝 LaTeX Resume Code:
-```latex
 {resume_latex}
-```
 
-### 🎥 Resume Writing Tutorial Videos:
-{videos}
-
-### 📋 Next Steps:
-1. Copy the LaTeX code above
-2. Paste into Overleaf or any LaTeX editor  
-3. Compile to generate PDF
-4. Watch the tutorial videos for additional tips
-5. Customize further based on your specific experience
-
-### 💡 Pro Tips:
-- Use action verbs in your experience section
-- Quantify achievements with numbers when possible
-- Tailor keywords to match the job description
-"""
-            
+### 📋 Next Steps
+1. Copy the LaTeX code above.
+2. Open [Overleaf](https://overleaf.com) and create a blank project.
+3. Paste and compile into a crisp, ATS-compliant PDF!
+4. Customize the achievements with quantifiable metrics (e.g., *'boosted latency by 35%'*)."""
         except Exception as e:
-            # Fallback with videos
-            try:
-                videos = youtube_search_cached("resume writing guide")
-                return f"""## 📄 Resume Help: {query}
+            return f"❌ Resume generation error: {str(e)}"
 
-Unable to generate LaTeX resume, but here are helpful tutorial videos:
-
-### 🎥 Resume Writing Videos:
-{videos}
-
-Error: {str(e)}"""
-            except:
-                return f"❌ Resume generation failed: {str(e)}"
 
 class NewsAgent:
     def __init__(self, model):
         self.model = model
-        self.tools = []
-        
+
     def process(self, query: str) -> str:
         t_tool = get_tavily_tool()
         d_tool = duck_tool
-        
         news_results = None
+
         if t_tool:
             try:
-                news_results = t_tool.invoke({"query": query + " latest news today"})
-            except Exception as e:
-                st.warning(f"Tavily search failed, falling back to DuckDuckGo: {str(e)}")
-        
+                news_results = t_tool.invoke({"query": f"{query} latest news"})
+            except Exception:
+                pass
+
         if not news_results and d_tool:
             try:
-                news_results = d_tool.invoke({"query": query + " latest news today"})
-            except Exception as e:
-                return f"News search failed: {str(e)}"
-                
-        if not news_results:
-            return "News search tools are not available or failed to execute."
-        
-        try:
-            # Generate news summary
-            summary_prompt = f"""
-            Summarize the latest news about '{query}' based on this information:
-            {news_results}
-            
-            Provide:
-            1. Key headlines
-            2. Important developments  
-            3. Implications or analysis
-            """
-            summary = self.model.invoke([HumanMessage(content=summary_prompt)]).content
-            
-            # Always try to get news analysis videos
-            try:
-                videos = youtube_search_cached(f"{query} latest news analysis")
-                if "No videos found" in videos:
-                    videos = youtube_search_cached(f"{query} current events")
+                news_results = d_tool.invoke({"query": f"{query} latest news"})
             except Exception:
-                videos = "🔍 News analysis videos temporarily unavailable."
-            
-            return f"""## 📰 Latest News: {query}
+                pass
 
-### 📈 News Summary:
-{summary}
+        if not news_results:
+            prompt = f"Give a briefing on recent developments and current landscape regarding: '{query}'."
+            return self.model.invoke([HumanMessage(content=prompt)]).content
 
-### 🎥 News Analysis Videos:
-{videos}
+        try:
+            summary_prompt = f"""Summarize these latest news updates about '{query}':
+{news_results}
 
-### 🔍 Stay Updated:
-- Check multiple news sources for comprehensive coverage
-- Watch analysis videos for different perspectives
-- Follow up on developing stories for latest updates
-"""
-            
+Provide:
+1. **Headline Summary**: Main story.
+2. **Key Developments**: Bullet points of facts.
+3. **Broader Impact**: What this means going forward."""
+            summary = self.model.invoke([HumanMessage(content=summary_prompt)]).content
+            return f"## 📰 News Briefing: {query}\n\n{summary}"
         except Exception as e:
-            # Fallback with videos
-            try:
-                videos = youtube_search_cached(f"{query} news")
-                return f"""## 📰 News Resources: {query}
-
-Unable to fetch latest news, but here are news analysis videos:
-
-### 🎥 News Videos:
-{videos}
-
-Error: {str(e)}"""
-            except:
-                return f"❌ News query failed: {str(e)}"
+            return f"❌ News query error: {str(e)}"
 
 
 class VideoAnalysisAgent:
     def __init__(self, model):
         self.model = model
-        self.tools = [youtube_qa, youtube_search]
-        
+
     def process(self, query: str, video_url: str = None) -> str:
         try:
             if video_url:
-                # Analyze specific video
                 analysis = youtube_qa.invoke({"video_url": video_url, "question": query})
-                
-                # Get similar videos
-                try:
-                    similar_videos = youtube_search_cached(f"similar to {query}")
-                except Exception:
-                    similar_videos = "🔍 Similar video search temporarily unavailable."
-                
-                return f"""## 🎥 Video Analysis Results
+                return f"""## 🎥 Video Transcript Q&A
 
-### 📋 Analysis of Your Video:
+**Video**: [{video_url}]({video_url})  
 **Question**: {query}
-**Answer**: {analysis}
 
-### 🎬 Related Videos You Might Like:
-{similar_videos}
-
-### 💡 Video Learning Tips:
-- Take notes while watching
-- Pause and replay complex sections
-- Try to summarize key points after watching
-- Use related videos to get different explanations
-"""
+### 📋 Answer from Transcript
+{analysis}"""
             else:
-                # No specific video provided, search for relevant videos
-                videos = youtube_search_cached(query)
-                return f"""## 🎥 Video Resources: {query}
-
-### 🎬 Recommended Videos:
-{videos}
-
-### 📝 How to Use These Videos:
-- Start with the most relevant title for your question
-- Watch multiple videos for comprehensive understanding  
-- Take notes on key concepts
-- Feel free to ask follow-up questions after watching
-"""
-                
+                return "🎥 **Video Analysis Agent**: Please provide a YouTube video link along with your question (e.g., *'Summarize this video: https://youtube.com/watch?v=xyz'*)."
         except Exception as e:
             return f"❌ Video analysis error: {str(e)}"
 
 
-# Query Analyzer
+class CodeAgent:
+    def __init__(self, model):
+        self.model = model
+
+    def process(self, query: str) -> str:
+        try:
+            return code_assistant_tool.invoke({"query": query})
+        except Exception as e:
+            return f"❌ Code assistant error: {str(e)}"
+
+
+class InterviewAgent:
+    def __init__(self, model):
+        self.model = model
+
+    def process(self, query: str) -> str:
+        try:
+            return interview_prep_tool.invoke({"query": query})
+        except Exception as e:
+            return f"❌ Interview prep error: {str(e)}"
+
+
+class HealthAgent:
+    def __init__(self, model):
+        self.model = model
+
+    def process(self, query: str) -> str:
+        try:
+            return health_advisor_tool.invoke({"query": query})
+        except Exception as e:
+            return f"❌ Health advisor error: {str(e)}"
+
+
+# ═══════════════════════════════════════════════════════════════
+# QUERY ANALYZER & SUPERVISOR
+# ═══════════════════════════════════════════════════════════════
 class QueryAnalyzer:
     def __init__(self, model):
         self.model = model
-        
-    def analyze_intent(self, query: str) -> Dict[str, any]:
+
+    def analyze_intent(self, query: str) -> Dict:
         try:
-            # Extract YouTube video URL (if any)
             video_url = None
             video_match = re.search(
                 r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)([^&\s]+)', query
@@ -1314,409 +892,426 @@ class QueryAnalyzer:
             if video_match:
                 video_url = video_match.group(0)
 
-            # Split query into sub-queries if needed
             sub_queries = re.split(r'[;|\n]|and also|also', query)
             sub_queries = [q.strip() for q in sub_queries if q.strip()]
             complexity = "complex" if len(sub_queries) > 1 else "simple"
 
-            # Enhanced intent detection
             query_lower = query.lower()
-            
-            if any(word in query_lower for word in ['paper', 'research', 'study', 'academic', 'scholar']):
+
+            if any(w in query_lower for w in ['code', 'program', 'function', 'debug', 'script',
+                    'algorithm', 'python', 'javascript', 'java', 'html', 'css', 'sql', 'api',
+                    'bug', 'error in code', 'write a', 'implement', 'syntax', 'compile',
+                    'class', 'method', 'variable', 'array', 'loop', 'regex']):
+                intent = "code"
+            elif any(w in query_lower for w in ['interview', 'hire', 'job interview', 'mock interview',
+                    'interview question', 'behavioral question', 'prepare for interview',
+                    'interview tips', 'hr round', 'technical round']):
+                intent = "interview"
+            elif any(w in query_lower for w in ['health', 'medical', 'symptom', 'disease', 'medicine',
+                    'doctor', 'wellness', 'nutrition', 'diet', 'exercise', 'mental health',
+                    'anxiety', 'depression', 'vitamin', 'blood pressure', 'diabetes',
+                    'fever', 'headache', 'pain', 'infection', 'vaccine']):
+                intent = "health"
+            elif any(w in query_lower for w in ['paper', 'research', 'study', 'academic', 'scholar']):
                 intent = "research"
-            elif any(word in query_lower for word in ['news', 'latest', 'recent', 'today', 'current']):
+            elif any(w in query_lower for w in ['news', 'latest', 'recent', 'today', 'current', 'headlines']):
                 intent = "news"
-            elif any(word in query_lower for word in ['resume', 'cv', 'job', 'career', 'application']):
+            elif any(w in query_lower for w in ['resume', 'cv', 'job application', 'career', 'cover letter']):
                 intent = "resume"
             elif video_url or 'analyze video' in query_lower or 'summarize video' in query_lower:
                 intent = "video_analysis"
-            elif any(word in query_lower for word in ['explain', 'what is', 'how to', 'learn', 'understand', 'tell me about']):
-                intent = "education"
             else:
-                intent = "education"  # Default to education for general queries
+                intent = "education"
 
             return {
                 "intent": intent,
                 "sub_queries": sub_queries if len(sub_queries) > 1 else [query],
                 "video_url": video_url,
-                "suggest_video": True,  # Always suggest videos
                 "complexity": complexity
             }
-
-        except Exception as e:
-            # Fallback
+        except Exception:
             return {
                 "intent": "education",
                 "sub_queries": [query],
                 "video_url": None,
-                "suggest_video": True,
                 "complexity": "simple"
             }
 
-# Multi-Agent Supervisor
+
 class MultiAgentSupervisor:
     def __init__(self, model):
         self.model = model
         self.analyzer = QueryAnalyzer(model)
-        # Keep all specialized agents
         self.agents = {
             "education": EducationAgent(model),
-            "research": ResearchAgent(model),  
-            "resume": ResumeAgent(model),
+            "code": CodeAgent(model),
+            "research": ResearchAgent(model),
+            "interview": InterviewAgent(model),
+            "health": HealthAgent(model),
             "news": NewsAgent(model),
+            "resume": ResumeAgent(model),
             "video_analysis": VideoAnalysisAgent(model),
-            "pdf": PDFRAGAgent(hf_token)  # Keep existing PDF agent
+            "pdf": PDFRAGAgent(),
         }
 
-    def process_query(self, query: str, uploaded_file=None) -> str:
-        if uploaded_file:
-            return self.agents["pdf"].process(uploaded_file)
-            
+    def process_query(self, query: str) -> str:
+        force = st.session_state.get("force_agent", "auto")
+        if force != "auto" and force in self.agents:
+            st.session_state.current_agent = force
+            agent = self.agents[force]
+            if force == "video_analysis":
+                video_match = re.search(
+                    r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)([^&\s]+)', query)
+                video_url = video_match.group(0) if video_match else None
+                return agent.process(query, video_url)
+            return agent.process(query)
+
         analysis = self.analyzer.analyze_intent(query)
         st.session_state.current_agent = analysis["intent"]
-        
+
         if len(analysis["sub_queries"]) > 1:
-            return self._process_multi_query(analysis)
+            responses = []
+            for sub_query in analysis["sub_queries"]:
+                single_analysis = {
+                    "intent": analysis["intent"],
+                    "sub_queries": [sub_query],
+                    "video_url": analysis.get("video_url"),
+                }
+                responses.append(self._process_single_query(single_analysis))
+            return "\n\n---\n\n".join(responses)
         else:
             return self._process_single_query(analysis)
 
     def _process_single_query(self, analysis: Dict) -> str:
         intent = analysis["intent"]
         query = analysis["sub_queries"][0]
-        agent = self.agents.get(intent)
-        
-        if not agent:
-            # Fallback to education agent for unknown intents
-            agent = self.agents["education"]
-            
+        agent = self.agents.get(intent, self.agents["education"])
+
         if intent == "video_analysis" and analysis.get("video_url"):
             return agent.process(query, analysis["video_url"])
-        elif intent == "resume":
-            return agent.process(query)
-        else:
-            return agent.process(query)
+        return agent.process(query)
 
-    def _process_multi_query(self, analysis: Dict) -> str:
-        responses = []
-        for sub_query in analysis["sub_queries"]:
-            single_analysis = {
-                "intent": analysis["intent"],
-                "sub_queries": [sub_query],
-                "video_url": analysis.get("video_url"),
-                "complexity": "simple"
-            }
-            responses.append(self._process_single_query(single_analysis))
-        return "\n\n---\n\n".join(responses)
 
-    def _general_response(self, query: str) -> str:
-        # Use education agent for general responses
-        return self.agents["education"].process(query)
-
-# ----------------- Main App -----------------
 supervisor = MultiAgentSupervisor(hf_model) if hf_model else None
 
-# Main App Functions
-def display_chat_message(message, is_user=True, agent=None):
-    if is_user:
-        st.markdown(f'<div class="user-message">{message}</div>', unsafe_allow_html=True)
-    else:
-        agent_badge = f'<div class="agent-badge">{agent.upper() if agent else "ASSISTANT"}</div>' if agent else ""
-        st.markdown(f'<div class="bot-message">{agent_badge}{message}</div>', unsafe_allow_html=True)
 
-def display_video_info(video_url):
+# ═══════════════════════════════════════════════════════════════
+# FOLLOW-UP SUGGESTIONS
+# ═══════════════════════════════════════════════════════════════
+def generate_followup_suggestions(query: str, agent: str) -> list:
+    """Generate 3 context-aware follow-up questions."""
+    suggestions_map = {
+        "education": [
+            f"Give me real-world examples of {query}",
+            f"What are common misconceptions about {query}?",
+            f"How does {query} compare to related concepts?"
+        ],
+        "code": [
+            "Can you optimize this code for performance?",
+            "Write comprehensive unit tests for this",
+            "Explain the time and space complexity"
+        ],
+        "interview": [
+            "What are common mistakes candidates make?",
+            "Give me a STAR model answer for this",
+            "What follow-up questions might the interviewer ask?"
+        ],
+        "health": [
+            f"What evidence-based lifestyle changes support {query}?",
+            f"What are common risk factors or causes?",
+            f"What questions should I ask my doctor about {query}?"
+        ],
+        "research": [
+            f"What are the latest breakthroughs in {query}?",
+            f"Who are the leading authors in {query}?",
+            f"What are open research questions in this area?"
+        ],
+        "resume": [
+            "How should I quantify achievements for this role?",
+            "What are the best power action verbs to use?",
+            "How do I tailor this for ATS screening systems?"
+        ],
+        "news": [
+            f"What is the background context for {query}?",
+            f"How does this impact the wider industry?",
+            f"What are experts forecasting next?"
+        ],
+        "video_analysis": [
+            "Summarize the key takeaways from the video",
+            "What action items or conclusions were presented?",
+            "What were the main arguments made?"
+        ]
+    }
+    return suggestions_map.get(agent, [
+        f"Can you provide more examples of {query}?",
+        f"What are the practical applications of {query}?",
+        f"Explain this from an advanced perspective"
+    ])
+
+
+# ═══════════════════════════════════════════════════════════════
+# DISPLAY HELPERS
+# ═══════════════════════════════════════════════════════════════
+def render_agent_badge(agent: str):
+    meta = AGENT_META.get(agent, AGENT_META["general"])
+    st.markdown(
+        f'<span class="agent-badge {meta["badge"]}">{meta["icon"]} {meta["label"]}</span>',
+        unsafe_allow_html=True
+    )
+
+def display_chat_message(message: str, is_user: bool = True, agent: str = None, timestamp: str = None):
+    if is_user:
+        with st.chat_message("user", avatar="🧑‍💻"):
+            if timestamp:
+                st.caption(f"🕒 {timestamp}")
+            st.markdown(message)
+    else:
+        meta = AGENT_META.get(agent, AGENT_META["general"])
+        with st.chat_message("assistant", avatar=meta.get("icon", "🤖")):
+            render_agent_badge(agent)
+            if timestamp:
+                st.caption(f"🕒 {timestamp}")
+            st.markdown(message)
+
+def display_video_info(video_url: str):
     video_id = extract_video_id(video_url)
     if video_id:
-        col1, col2 = st.columns([1, 2])
+        col1, col2 = st.columns([1, 3])
         with col1:
-            thumbnail_url = get_video_thumbnail(video_id)
-            if thumbnail_url:
-                try:
-                    st.image(thumbnail_url, caption="Video Thumbnail", use_container_width=True)
-                except:
-                    st.info("Could not load thumbnail")
+            st.image(get_video_thumbnail(video_id), use_container_width=True)
         with col2:
-            st.info(f"**Video ID:** {video_id}")
-            st.info(f"**URL:** {video_url}")
-
-# Initialize supervisor
-if hf_model:
-    supervisor = MultiAgentSupervisor(hf_model)
-else:
-    supervisor = None
-
-# ===================================================
+            st.markdown(f"🎬 **Video**: [{video_url}]({video_url})")
 
 def display_pdf_tab():
     st.subheader("📑 PDF Q&A with RAG")
-    st.write("Upload a PDF document and ask questions about its content!")
-    
+    st.markdown("Upload a PDF document to index it and ask questions using local embeddings.")
+
     uploaded_file = st.file_uploader(
-        "Choose a PDF file", 
+        "Choose a PDF file",
         type=["pdf"],
-        help="Upload a PDF document to analyze and ask questions about"
+        help="Upload a PDF document to analyze"
     )
-    
-    # Initialize PDF agent in session state
+
     if "pdf_agent" not in st.session_state:
-        st.session_state.pdf_agent = PDFRAGAgent(hf_token)
-    
-    # Process uploaded file
+        st.session_state.pdf_agent = PDFRAGAgent()
+
     if uploaded_file is not None:
-        if st.button("Process PDF", type="primary"):
-            with st.spinner("Processing PDF... This may take a moment."):
+        if st.button("📤 Process PDF", type="primary"):
+            with st.spinner("Indexing PDF..."):
                 success = st.session_state.pdf_agent.load_pdf(uploaded_file)
-                
             if success:
                 st.success("✅ PDF loaded successfully! You can now ask questions.")
                 st.session_state.pdf_processed = True
             else:
                 st.error("❌ Failed to process PDF. Please try again.")
                 st.session_state.pdf_processed = False
-    
-    # Question input (only show if PDF is processed)
+
     if getattr(st.session_state, 'pdf_processed', False):
         st.markdown("---")
         st.subheader("Ask Questions")
-        
         user_question = st.text_input(
             "What would you like to know about the document?",
-            placeholder="e.g., What is the main topic discussed? Summarize chapter 1."
+            placeholder="e.g., What is the main thesis? Summarize chapter 1."
         )
-        
         col1, col2 = st.columns([3, 1])
-        
         with col1:
-            ask_button = st.button("Get Answer", type="primary", use_container_width=True)
-        
+            ask_button = st.button("🔍 Get Answer", type="primary", use_container_width=True)
         with col2:
-            if st.button("Clear", use_container_width=True):
+            if st.button("🗑️ Clear PDF", use_container_width=True):
                 st.session_state.pdf_processed = False
-                st.session_state.pdf_agent = PDFRAGAgent(hf_token)
+                st.session_state.pdf_agent = PDFRAGAgent()
                 st.rerun()
-        
+
         if ask_button and user_question.strip():
             with st.spinner("Analyzing document..."):
                 answer = st.session_state.pdf_agent.answer_question(user_question, hf_model)
-            
-            st.markdown("### Answer:")
+            st.markdown("### 📝 Answer")
             st.markdown(answer)
-            
-            # Add to chat history if desired
             timestamp = time.strftime("%H:%M")
             st.session_state.chat_history.append((
-                f"PDF Q&A: {user_question}", 
-                answer, 
-                "pdf", 
-                timestamp
+                f"📑 PDF Q&A: {user_question}", answer, "pdf", timestamp
             ))
-    
     else:
-        st.info("👆 Please upload and process a PDF file first to start asking questions.")
+        st.info("👆 Upload and process a PDF file to begin.")
 
 
-
-
-# Main App Layout
+# ═══════════════════════════════════════════════════════════════
+# MAIN APPLICATION
+# ═══════════════════════════════════════════════════════════════
 def main():
-    st.title("🤖 AI Multi-Agent Assistant")
-    st.markdown("*Your intelligent companion for education, research, video analysis, and more!*")
-    
-    # Create tabs for different functionalities
-    tab1, tab5,tab2, tab3,tab4 = st.tabs(["💬 Chat","📄 PDF Analysis" ,"📊 Analytics", "⚙️ Settings", "📖 Help"])
-    
+    # ── SIDEBAR ──
+    with st.sidebar:
+        st.markdown('<div class="hero-title" style="font-size:1.5rem;">🧠 IntelliAgent</div>', unsafe_allow_html=True)
+        st.markdown("---")
 
-    with tab1:
-        # Chat Interface
-        st.header("Chat Interface")
-        
-        # Display chat history
+        # Model status
+        model_name = st.session_state.get("model_name", "Not Connected")
+        if hf_model:
+            st.markdown(
+                f'<span class="status-pill status-online">● {model_name}</span>',
+                unsafe_allow_html=True
+            )
+        else:
+            st.markdown(
+                '<span class="status-pill status-offline">● Not Connected</span>',
+                unsafe_allow_html=True
+            )
+
+        st.markdown("---")
+
+        # Agent mode selector
+        st.markdown("##### 🎯 Agent Mode")
+        agent_options = {
+            "auto": "🤖 Auto-Detect",
+            "education": "🎓 Education",
+            "code": "💻 Code Assistant",
+            "interview": "🎤 Interview Prep",
+            "health": "🏥 Health Advisor",
+            "research": "🔬 Research",
+            "news": "📰 News",
+            "resume": "📄 Resume",
+            "video_analysis": "🎥 Video Analysis",
+        }
+        selected = st.selectbox(
+            "Force agent",
+            options=list(agent_options.keys()),
+            format_func=lambda x: agent_options[x],
+            label_visibility="collapsed"
+        )
+        st.session_state.force_agent = selected
+
+        st.markdown("---")
+
+        # Session stats
+        st.markdown("##### 📊 Session Stats")
+        st.markdown(f"**Messages**: {len(st.session_state.chat_history)}")
         if st.session_state.chat_history:
-            st.subheader("Conversation History")
-            for i, (user_msg, bot_msg, agent, timestamp) in enumerate(st.session_state.chat_history[-10:]):
-                display_chat_message(user_msg, is_user=True)
-                display_video_info(user_msg) if "youtube.com" in user_msg or "youtu.be" in user_msg else None
-                display_chat_message(bot_msg, is_user=False, agent=agent)
-                st.markdown("---")
-        
-        # Input area
-        st.subheader("Ask me anything!")
-        
+            agents_used = set(item[2] for item in st.session_state.chat_history if len(item) > 2)
+            st.markdown(f"**Specialists used**: {len(agents_used)}")
+
+        st.markdown("---")
+
+        if st.button("🗑️ Clear Chat History", use_container_width=True):
+            st.session_state.chat_history = []
+            st.rerun()
+
+    # ── MAIN CONTENT ──
+    st.markdown(
+        '<div class="hero-title">🧠 IntelliAgent</div>'
+        '<div class="hero-subtitle">Multi-Agent AI Assistant — Education • Code • Interview • Health • Research • News • Resume • PDF</div>',
+        unsafe_allow_html=True
+    )
+    st.markdown("")
+
+    # Tabs
+    tab_chat, tab_pdf, tab_help = st.tabs([
+        "💬 Chat", "📑 PDF Analysis", "📖 Help"
+    ])
+
+    # ── CHAT TAB ──
+    with tab_chat:
+        if st.session_state.chat_history:
+            for i, (user_msg, bot_msg, agent, timestamp) in enumerate(st.session_state.chat_history[-15:]):
+                display_chat_message(user_msg, is_user=True, timestamp=timestamp)
+                if "youtube.com" in user_msg or "youtu.be" in user_msg:
+                    display_video_info(user_msg)
+                display_chat_message(bot_msg, is_user=False, agent=agent, timestamp=timestamp)
+                st.markdown("")
+
+            # Follow-up suggestions
+            last_query = st.session_state.chat_history[-1][0]
+            last_agent = st.session_state.chat_history[-1][2]
+            suggestions = generate_followup_suggestions(last_query, last_agent)
+
+            st.markdown("**💡 Follow-up suggestions:**")
+            cols = st.columns(len(suggestions))
+            for idx, (col, suggestion) in enumerate(zip(cols, suggestions)):
+                with col:
+                    if st.button(suggestion, key=f"followup_{idx}", use_container_width=True):
+                        st.session_state.followup_query = suggestion
+                        st.rerun()
+
+        st.markdown("---")
+
+        default_value = st.session_state.pop("followup_query", "")
+
         with st.container():
             user_input = st.text_area(
-                "Your message:",
-                height=120,
-                placeholder="Try:\n• Explain quantum computing\n• Analyze this video: https://youtube.com/watch?v=...\n• Generate a resume for software engineer\n• What are the latest AI trends?",
+                "Ask me anything:",
+                height=110,
+                value=default_value,
+                placeholder="Try:\n• Explain quantum computing\n• Write a Python script to sort a list\n• Prepare me for a software engineer interview\n• What are evidence-based tips for better sleep?",
                 key="user_input"
             )
-            
-            col1, col2, col3 = st.columns([2, 1, 1])
-            
+
+            col1, col2 = st.columns([3, 1])
+
             with col1:
-                send_button = st.button("Send Message", type="primary", use_container_width=True)
-            
+                send_button = st.button("🚀 Send Message", type="primary", use_container_width=True)
+
             with col2:
-                clear_button = st.button("Clear Chat", use_container_width=True)
-            
-            with col3:
-                if st.button("Example", use_container_width=True):
-                    st.session_state.user_input = "Explain machine learning in simple terms"
-        
-        # Handle button clicks
-        if clear_button:
-            st.session_state.chat_history = []
-            st.success("Chat history cleared!")
-            st.rerun()
-        
+                if st.button("✨ Example", use_container_width=True):
+                    st.session_state.followup_query = "Write a Python function to check for palindromes with unit tests"
+                    st.rerun()
+
+        # Process input
         if send_button and user_input.strip() and supervisor:
             if not st.session_state.processing:
                 st.session_state.processing = True
-                
                 timestamp = time.strftime("%H:%M")
-                
-                with st.spinner("AI is processing your request..."):
+
+                force = st.session_state.get("force_agent", "auto")
+                if force != "auto":
+                    meta = AGENT_META.get(force, AGENT_META["general"])
+                    st.info(f"{meta['icon']} Routing to **{meta['label']} Agent**")
+
+                with st.spinner("🧠 IntelliAgent is thinking..."):
                     try:
                         response = supervisor.process_query(user_input)
                         agent = st.session_state.current_agent
-                        
-                        # Add to history
                         st.session_state.chat_history.append((user_input, response, agent, timestamp))
-                        
-                        # Display new response
-                        st.success("Response generated!")
-                        display_chat_message(user_input, is_user=True)
-                        display_video_info(user_input) if "youtube.com" in user_input or "youtu.be" in user_input else None
-                        display_chat_message(response, is_user=False, agent=agent)
-                        
+                        st.rerun()
                     except Exception as e:
                         error_msg = f"Error processing your request: {str(e)}"
                         st.error(error_msg)
                         st.session_state.chat_history.append((user_input, error_msg, "error", timestamp))
-                    
                     finally:
                         st.session_state.processing = False
-        
+
         elif send_button and not supervisor:
-            st.error("AI model is not initialized. Please check your configuration.")
-    with tab5:  # assuming 0=Chat,1=Analytics,2=Settings,3=Hel
+            st.error("⚠️ AI model is not initialized. Please verify `GROQ_API_KEY` in your `.env` file.")
+
+    # ── PDF TAB ──
+    with tab_pdf:
         display_pdf_tab()
 
-    
-    with tab2:
-        # Analytics
-        st.header("📊 Usage Analytics")
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.markdown(
-                f'<div class="metric-card"><h3>{len(st.session_state.chat_history)}</h3><p>Total Conversations</p></div>',
-                unsafe_allow_html=True
-            )
-        
-        with col2:
-            st.markdown(
-                f'<div class="metric-card"><h3>{st.session_state.current_agent.title()}</h3><p>Current Agent</p></div>',
-                unsafe_allow_html=True
-            )
-        
-        with col3:
-            status = "Online" if hf_model else "Offline"
-            st.markdown(
-                f'<div class="metric-card"><h3>{status}</h3><p>Model Status</p></div>',
-                unsafe_allow_html=True
-            )
-        
-        # Agent usage statistics
-        if st.session_state.chat_history:
-            st.subheader("Agent Usage Distribution")
-            agents = [item[2] for item in st.session_state.chat_history if len(item) > 2]
-            if agents:
-                agent_counts = {}
-                for agent in agents:
-                    agent_counts[agent] = agent_counts.get(agent, 0) + 1
-                
-                for agent, count in agent_counts.items():
-                    st.metric(f"{agent.title()} Agent", count)
-    
-    with tab3:
-        # Settings
-        st.header("⚙️ Configuration")
-        
-        st.subheader("Model Configuration")
-        model_status = "✅ Connected" if hf_model else "❌ Not Connected"
-        st.info(f"Google Gemini Status: {model_status}")
-        
-        st.subheader("Chat Settings")
-        max_history = st.slider("Maximum chat history to display", 5, 50, 10)
-        
-        st.subheader("Agent Settings")
-        default_agent = st.selectbox(
-            "Default Agent",
-            ["auto", "education", "research", "resume", "news", "video_analysis"]
-        )
-        
-        if st.button("Save Settings"):
-            st.success("Settings saved successfully!")
-        
-        st.subheader("System Information")
-        st.json({
-            "Model": "Google Gemini 1.5 Flash",
-            "Version": "1.0.0",
-            "Status": "Active" if hf_model else "Inactive"
-        })
-    
-    with tab4:
-        # Help
+    # ── HELP TAB ──
+    with tab_help:
         st.header("📖 Help & Documentation")
-        
-        st.subheader("Available Agents")
-        
+
+        st.subheader("Available Specialist Agents")
         agents_info = {
-            "🎓 Education Agent": "Provides detailed explanations of complex topics with related video resources",
-            "🔬 Research Agent": "Fetches and summarizes academic papers from Semantic Scholar",
-            "📄 Resume Agent": "Generates professional LaTeX resumes optimized for ATS systems",
-            "📰 News Agent": "Fetches and summarizes latest news on any topic",
-            "🎥 Video Analysis Agent": "Analyzes YouTube videos and answers questions based on transcripts"
+            "💻 Code Assistant": "Generates, explains, reviews, and debugs code across any programming language",
+            "🎤 Interview Prep": "Role-specific interview preparation, STAR method model answers, and coaching",
+            "🏥 Health Advisor": "Explains medical and wellness topics in plain language (educational, not medical advice)",
+            "🎓 Education Agent": "Breaks down complex academic and technical topics with step-by-step clarity",
+            "🔬 Research Agent": "Fetches and synthesizes academic papers from Semantic Scholar",
+            "📰 News Agent": "Searches and summarizes recent real-world news and developments",
+            "📄 Resume Agent": "Generates professional ATS-optimized LaTeX resumes",
+            "🎥 Video Analysis": "Answers specific questions about any YouTube video using subtitles/transcripts",
+            "📑 PDF Q&A": "Answers questions based on uploaded PDF documents using local vector embeddings"
         }
-        
         for agent, description in agents_info.items():
             st.markdown(f"**{agent}**: {description}")
-        
-        st.subheader("Usage Examples")
-        
-        examples = [
-            "**Education**: 'Explain quantum computing in simple terms'",
-            "**Video Analysis**: 'Summarize this video: https://youtube.com/watch?v=xyz'",
-            "**Research**: 'Find papers about machine learning applications'",
-            "**Resume**: 'Create a resume for data scientist position'",
-            "**News**: 'What are the latest AI trends today?'",
-            "**General**: 'Give me tips to improve productivity'"
-        ]
 
-        for ex in examples:
-            st.markdown(f"- {ex}")
-
-        st.subheader("FAQ")
-        faq_items = {
-            "How do I clear the chat history?": "Go to the **Chat tab** and click **Clear Chat**.",
-            "Why do I get transcript errors on some videos?": 
-                "Not all YouTube videos have transcripts enabled. Try a different video.",
-            "How do I generate a resume PDF?": 
-                "Copy the LaTeX code output from the Resume Agent, paste it into Overleaf or TeX editor, and compile.",
-            "Can I ask multiple things in one query?": 
-                "Yes! Use semicolons or 'and also'. The assistant will split into sub-queries."
-        }
-
-        for q, a in faq_items.items():
-            st.markdown(f"**{q}**")
-            st.write(a)
-            st.markdown("---")
-
-        st.success("You’re all set! Use the tabs to explore different assistants 🚀")
-        
+        st.markdown("---")
+        st.subheader("Tips for Best Results")
+        st.markdown("""
+        - **Automatic Intent Detection**: Simply type naturally. The supervisor will detect whether your query is about code, interviews, health, education, etc.
+        - **Manual Override**: Want to guarantee a specific specialist? Choose it from the **Agent Mode** dropdown in the sidebar.
+        - **YouTube Video Analysis**: Paste any YouTube link directly into your query along with your question!
+        """)
 
 
-# Run the app
 if __name__ == "__main__":
     main()
-

@@ -1,98 +1,88 @@
-# 🚀 Multi-Agent AI Assistant
+# 🧠 IntelliAgent — Multi-Agent AI Assistant
 
-## 📌 Problem Statement
-Building an AI-powered **multi-agent assistant** that can:
-
-- 📖 Explain educational concepts with supporting YouTube content
-- 🔬 Perform research summarization (Semantic Scholar + video references)
-- 📝 Assist with resume generation and provide improvement resources
-- 📰 Fetch and summarize latest news with context videos
-- 🎥 Analyze and answer questions from YouTube transcripts
-- 📄 Provide Q&A over uploaded PDFs using **RAG (Retrieval-Augmented Generation)**
-
-👉 This project showcases how **LangChain, HuggingFace, Tavily, and Streamlit** can be combined into a unified intelligent assistant.
+An intelligent, multi-agent AI assistant built with **Streamlit**, **LangChain**, and **Groq**. IntelliAgent features a supervisor-directed architecture that automatically analyzes query intent and routes questions to specialized AI agents—or allows manual agent override—with modern dark glassmorphic UI, local PDF RAG indexing, and YouTube transcript Q&A.
 
 ---
 
-## 🧩 Agent Interactions
+## ✨ Features & Specialized Agents
 
-### 🎓 Education Agent
-- Takes user queries
-- Returns explanations + relevant YouTube videos  
-
-### 🔬 Research Agent
-- Summarizes papers from Semantic Scholar
-- Provides supporting YouTube content  
-
-### 📝 Resume Agent
-- Generates a LaTeX-based resume
-- Suggests resume-building tutorials  
-
-### 📰 News Agent
-- Fetches top stories using Tavily or DuckDuckGo
-- Summarizes + provides related YouTube videos  
-
-### 🎥 Video Agent
-- Extracts YouTube transcripts
-- Allows Q&A on video content
-- Suggests related resources  
-
-### 📄 PDF Agent
-- Supports PDF upload
-- Performs Q&A with embeddings via **ChromaDB + HuggingFace**
+| Agent | Capability | Key Backing Tool |
+| :--- | :--- | :--- |
+| 💻 **Code Assistant** | Code generation, line-by-line breakdown, debugging, syntax repair, and code reviews across any programming language. | `code_assistant_tool` |
+| 🎤 **Interview Prep** | Role-specific technical & behavioral interview questions, STAR method model answers, and coaching. | `interview_prep_tool` |
+| 🏥 **Health Advisor** | Plain-language physiological explanations, evidence-based wellness guidance, and medical disclaimers. | `health_advisor_tool` |
+| 🎓 **Education Agent** | Structured conceptual breakdowns, principles, practical examples, and study techniques. | `topic_explanation` |
+| 🔬 **Research Agent** | Academic paper search, abstract summarization, and key findings synthesis via Semantic Scholar. | `semantic_scholar_research` |
+| 📰 **News Agent** | Real-time news search and executive briefings using Tavily and DuckDuckGo. | `tavily_search` / `duckduckgo_search` |
+| 📄 **Resume Agent** | Generation of ATS-compliant LaTeX resume templates and actionable tailoring advice. | `generate_resume` |
+| 🎥 **Video Analysis** | Direct question answering on YouTube videos using subtitles and transcripts (no API key needed). | `youtube_qa` (`youtube-transcript-api`) |
+| 📑 **PDF Q&A with RAG** | Document indexing and conversational retrieval using ChromaDB and local sentence transformers. | `PDFRAGAgent` (`all-MiniLM-L6-v2`) |
 
 ---
 
-## ⚙️ Technologies Used
-- 🎨 **Streamlit** → Frontend UI  
-- 🔗 **LangChain / LangGraph** → Multi-agent orchestration  
-- 🤗 **HuggingFace Transformers** → Embeddings & NLP  
-- 🗄 **ChromaDB** → Vector storage for PDFs  
-- 🌐 **Tavily / DuckDuckGo** → News & web search  
-- 🎥 **YouTube APIs (pytube, transcript)** → Video analysis  
-- 📑 **Semantic Scholar API** → Research paper summaries  
-- 🖋 **LaTeX** → Resume generation  
+## 🎨 User Interface Highlights
+- **High-Contrast Dark Theme**: Custom CSS palette (Cyber Obsidian `#0A0F1D` and Electric Indigo/Cyan `#38BDF8`) with WCAG AAA readability.
+- **Native Chat Bubbles**: Seamless `st.chat_message` rendering with distinct specialist badges, avatar icons, and Pygments syntax highlighting.
+- **Agent Mode Selector**: Let the auto-detect supervisor choose the specialist or force-route queries directly via the sidebar.
+- **Follow-Up Suggestions**: Dynamic, context-aware prompt chips below assistant responses to accelerate exploration.
+- **Session Stats & Quick Reset**: Track messages and active specialist count with one-click conversation clearing.
 
 ---
 
-## ✅ Multi-agent architecture
-👉 This project follows the **Supervisor (tool-calling)** system:  
-- Each specialist is exposed as a tool  
-- A central LLM supervisor decides which tool/agent to invoke  
-- Execution flow: **Reason → Tool → Reason → Tool** (ReAct-style handoffs)  
-
-### 🔹 ReAct Ability
-✅ **Yes!**  
-Your supervisor uses reasoning to decide the next tool → this is **ReAct (Reason + Act)** applied through **LangGraph tool-calling**.  
+## 🛠️ Tech Stack
+- **Frontend**: Streamlit
+- **LLM Orchestration**: LangChain & LangChain Community
+- **Inference Engine**: [Groq Cloud](https://console.groq.com/) (`openai/gpt-oss-120b`, `llama-3.3-70b-versatile`)
+- **Embeddings & Vector Store**: ChromaDB + Sentence Transformers (`sentence-transformers/all-MiniLM-L6-v2` running locally)
+- **Web & Academic Search**: Tavily AI, DuckDuckGo Search, Semantic Scholar API
+- **Video Processing**: `youtube-transcript-api`
 
 ---
 
-## ⚡ Setup & Run Instructions
+## 🚀 Quickstart Guide
 
-
+### 1. Clone the Repository
 ```bash
-1️⃣ Clone the repository
-git clone https://github.com/your-username/multi-agent-assistant.git
-cd multi-agent-assistant
+git clone https://github.com/AayushDey/IntelliAgentMultiAgentAIAssistant-main.git
+cd IntelliAgentMultiAgentAIAssistant-main
+```
 
-2️⃣ Create a virtual environment
-python -m venv langvenv
-langvenv\Scripts\activate   # Windows
-source langvenv/bin/activate   # Linux/Mac
+### 2. Set Up Virtual Environment
+```bash
+python -m venv venv
+# On Windows:
+venv\Scripts\activate
+# On macOS / Linux:
+source venv/bin/activate
+```
 
-3️⃣ Install dependencies
+### 3. Install Dependencies
+```bash
 pip install -r requirements.txt
+```
 
-4️⃣ Setup environment variables
+### 4. Configure Environment Variables
+Copy `.env.example` to `.env` and fill in your API keys:
+```bash
+cp .env.example .env
+```
+Inside `.env`:
+```env
+# Required: Free Groq API Key (https://console.groq.com/)
+GROQ_API_KEY=your_groq_api_key_here
 
-Add API keys in a .env file
+# Optional: Tavily Search Key for real-time web search (https://tavily.com/)
+TAVILY_API_KEY=your_tavily_api_key_here
+```
 
-For Streamlit Cloud, configure inside .streamlit/secrets.toml
-
-5️⃣ Run the Streamlit app
+### 5. Launch the Application
+```bash
 streamlit run app.py
+```
+Open **`http://localhost:8501`** in your browser.
 
-6️⃣ Open in Browser
+---
 
-🎉 Open your browser at: http://localhost:8501
-
+## 🔒 Security & Privacy
+- Sensitive files such as `.env` and local secrets are excluded from source control via `.gitignore`.
+- Local document embeddings run offline on your machine without external API token requirements.

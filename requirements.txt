@@ -2,17 +2,13 @@ streamlit
 langchain
 langchain-community
 langchain-core
-langchain-google-genai
 langchain-groq
 langchain-huggingface
-langgraph
-langgraph-supervisor
 chromadb
 sentence-transformers
 huggingface-hub
 pypdf
 youtube-transcript-api
-google-generativeai
 duckduckgo-search
 tavily-python
 semanticscholar
